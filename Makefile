@@ -1,20 +1,19 @@
-TARGET	:= pctltcp-sysmodule
-SOURCES	:= source
-DATA	:= data
+TARGET := pctltcp-sysmodule
+BUILD  := build
+SOURCES := source
+DATA   := data
 
 # Sysmodule (not application!)
-APPLET_TYPE	:= 4
-NOSHAREDFW	:= true
+APPLET_TYPE := 4
+NOSHAREDFW := true
 
-ARCH	:= -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIE
-CFLAGS	+= -O2 -ffunction-sections -fdata-sections -DVERSION_S=\"1.0.0\"
-CXXFLAGS	+= $(CFLAGS)
-LDFLAGS	+= -Wl,--gc-sections
+# Compiler flags
+ARCH := -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIE
+CFLAGS   := -g -Wall -O2 -ffunction-sections -fdata-sections -D__SWITCH__ -DVERSION_S=\"1.0.0\"
+CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
+ASFLAGS  := -g $(ARCH)
+LDFLAGS  := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*).map
+LIBS     := -lnx -lpthread
 
-LIBS	:= -lnx -lpthread
-
-NACP_TITLE	:= "PCTL Sysmodule"
-NACP_AUTHOR	:= "gmaitxqqq"
-NACP_VERSION	:= "1.0.0"
-
-include $(DEVKITPRO)/libnx/switch.build
+# Include switch_rules (not switch.build!)
+include $(DEVKITPRO)/libnx/switch_rules
