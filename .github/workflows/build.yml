@@ -5,21 +5,29 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: devkitpro/devkita64
+    container:
+      image: devkitpro/devkita64:latest
 
     steps:
-    - uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Build
-      run: |
-        make
+      - name: Build
+        run: |
+          make clean
+          make -j$(nproc)
 
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: pctltcp-sysmodule
-        path: |
-          pctltcp-sysmodule.nro
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pctltcp-sysmodule
+          path: |
+            pctltcp-sysmodule.nro
+            exefs.nsp
