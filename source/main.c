@@ -1,17 +1,3 @@
-/**
- * switch-pctltcp-sysmodule - Background HTTP server sysmodule
- *
- * Features:
- *   - Runs as Atmosphere sysmodule (boot2.flag)
- *   - Opens HTTP server on port 8080
- *   - Exposes /api/status and /api/set for parental control
- *   - No console output (background service)
- *
- * Sysmodule framework based on sys-botbase pattern.
- *
- * Build: make -> produces pctltcp-sysmodule.nro
- * Deploy: atmosphere/contents/<program_id>/exefs.nsp + flags/boot2.flag
- */
 #include <switch.h>
 #include <stdio.h>
 #include <string.h>
@@ -22,15 +8,12 @@
 #include "pctl_handler.h"
 #include "http_server.h"
 
-/* ------------------------------------------------------------------ */
-/* Sysmodule entry points                                              */
-/* ------------------------------------------------------------------ */
+/* Sysmodule = no application framework */
 u32 __nx_applet_type = AppletType_None;
 
-/* Manual heap init for sysmodule */
+static u8 _heap[0x100000];
 void __libnx_initheap(void)
 {
-    static u8 _heap[0x100000];  /* 1MB heap */
     extern void *fake_heap_start;
     extern void *fake_heap_end;
     fake_heap_start = _heap;
@@ -41,9 +24,7 @@ void __appInit(void)
 {
     smInitialize();
     setsysInitialize();
-    /* Do NOT call socketInitializeDefault() here.
-     * Network service may not be ready at sysmodule init time.
-     * We initialize sockets in main() with retry instead. */
+    /* socketInit is done in main() with retry */
 }
 
 void __appExit(void)
@@ -52,52 +33,41 @@ void __appExit(void)
     smExit();
 }
 
-/* ------------------------------------------------------------------ */
-/* Main                                                                */
-/* ------------------------------------------------------------------ */
+/* ── main ── */
 int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
 
-    /* Initialize pctl service (try pctl:a -> pctl:s -> pctl:r -> pctl) */
+    /* 1. Init pctl (best-effort) */
     Result pctl_rc = pctl_init();
-    /* Ignore error - we still run HTTP server even if pctl fails */
+    /* Ignore error - we still run HTTP server */
 
-    /* Initialize socket with retry (network may not be ready yet) */
+    /* 2. Init socket with retry (network may not be up yet) */
     Result sock_rc = MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
-    for (int i = 0; i < 60; i++) {
+    for (int i = 0; i < 60 && R_FAILED(sock_rc); i++) {
         sock_rc = socketInitializeDefault();
-        if (R_SUCCEEDED(sock_rc))
-            break;
-        svcSleepThread(2000000000ULL);  /* wait 2 seconds */
+        if (R_SUCCEEDED(sock_rc)) break;
+        svcSleepThread(2000000000ULL);
     }
 
     if (R_FAILED(sock_rc)) {
-        /* Can't start HTTP server without network */
         if (R_SUCCEEDED(pctl_rc)) pctl_exit();
         return 1;
     }
 
-    /* Start HTTP server */
+    /* 3. Start HTTP server thread */
     http_server_start();
 
-    /* Main loop - sleep until system requests exit */
-    /* In sysmodule context, we check s_running flag + yield CPU */
+    /* 4. Main loop - sleep until system asks us to exit */
     while (1) {
-        /* Check if we should exit (system signal) */
-        /* sysmodule doesn't have appletMainLoop, use svcSleepThread */
-        svcSleepThread(1000000000ULL);  /* sleep 1s */
-
-        /* If HTTP server stopped (error), exit */
+        svcSleepThread(1000000000ULL);  /* 1 s */
         if (!http_server_is_running())
             break;
     }
 
-    /* Cleanup */
+    /* 5. Cleanup */
     http_server_stop();
-
     if (R_SUCCEEDED(pctl_rc)) pctl_exit();
     socketExit();
-
     return 0;
 }
