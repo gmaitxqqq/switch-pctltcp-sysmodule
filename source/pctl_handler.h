@@ -1,6 +1,5 @@
 #ifndef PCTL_HANDLER_H
 #define PCTL_HANDLER_H
-
 #include <switch.h>
 
 #define PCTL_PLAY_TIMER_SETTINGS_SIZE   0x44
@@ -11,9 +10,7 @@
 #define PT_DAY_NOLIMIT                  0xFFFFu
 
 #pragma pack(push, 1)
-typedef struct {
-    u16 raw[PCTL_SETTINGS_U16_COUNT];
-} PlayTimerSettings;
+typedef struct { u16 raw[PCTL_SETTINGS_U16_COUNT]; } PlayTimerSettings;
 #pragma pack(pop)
 
 _Static_assert(sizeof(PlayTimerSettings) == PCTL_PLAY_TIMER_SETTINGS_SIZE,
@@ -25,20 +22,17 @@ _Static_assert(sizeof(PlayTimerSettings) == PCTL_PLAY_TIMER_SETTINGS_SIZE,
 Result pctl_init(void);
 void pctl_exit(void);
 bool pctl_is_initialized(void);
-
 Result pctl_start_play_timer(void);
 Result pctl_stop_play_timer(void);
 Result pctl_is_enabled(bool *enabled);
 Result pctl_get_remaining_time(u64 *remaining_ns);
 Result pctl_is_restricted(bool *restricted);
-
 Result pctl_get_settings(PlayTimerSettings *settings);
 Result pctl_set_settings(const PlayTimerSettings *settings);
-
 Result pctl_get_day_limit_minutes(int day, u32 *minutes);
 Result pctl_set_day_limit_minutes(int day, u32 minutes);
 Result pctl_set_daily_limit_minutes(u32 minutes);
 Result pctl_get_daily_limit_minutes(u32 *minutes);
 Result pctl_reset_play_time(void);
 
-#endif /* PCTL_HANDLER_H */
+#endif
