@@ -1,5 +1,6 @@
 #---------------------------------------------------------------------------------
-# .SUFFIXES:
+# switch-pctltcp-sysmodule Makefile
+# Builds both .nro (for testing) and exefs.nsp (for sysmodule deployment)
 #---------------------------------------------------------------------------------
 
 ifeq ($(strip $(DEVKITPRO)),)
@@ -10,98 +11,75 @@ TOPDIR ?= $(CURDIR)
 include $(DEVKITPRO)/libnx/switch_rules
 
 #---------------------------------------------------------------------------------
-# TARGET is the name of the output
-# BUILD is the directory where object files & intermediate files will be placed
-# SOURCES is a list of directories containing source code
-# DATA is a list of directories containing data files
-# INCLUDES is a list of directories containing header files
-#---------------------------------------------------------------------------------
 TARGET := pctltcp-sysmodule
 
 # Sysmodule (background service)
 APPLET_TYPE := 4
 NOSHAREDFW := true
-BUILD		:=	build
-SOURCES		:=	source
-DATA		:=	data
-INCLUDES	:=	include
+
+BUILD   := build
+SOURCES := source
+DATA    := data
+INCLUDES := include
 
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
-ARCH	:=	-march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIE
 
-CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
-			$(ARCH) $(DEFINES)
+ARCH    := -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIE
 
-CFLAGS	+=	$(INCLUDE) -D__SWITCH__ -DVERSION_S=\"1.0.0\"
+CFLAGS  := -g -Wall -O2 -ffunction-sections \
+           $(ARCH) $(DEFINES)
 
-CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
+CFLAGS  += $(INCLUDE) -D__SWITCH__ -DVERSION_S=\"1.0.0\"
 
-ASFLAGS	:=	-g $(ARCH)
+CXXFLAGS:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 
-LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+ASFLAGS := -g $(ARCH)
 
-LIBS	:= -lnx
+LDFLAGS = -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-#---------------------------------------------------------------------------------
-# list of directories containing libraries, this must be the top level containing
-# include and lib
-#---------------------------------------------------------------------------------
-LIBDIRS	:= $(PORTLIBS) $(LIBNX)
+LIBS    := -lnx
 
 #---------------------------------------------------------------------------------
 # no real need to edit anything past this point unless you need to add additional
 # rules for different file extensions
 #---------------------------------------------------------------------------------
+
+LIBDIRS := $(PORTLIBS) $(LIBNX)
+
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 #---------------------------------------------------------------------------------
 
-export OUTPUT	:=	$(CURDIR)/$(TARGET)
-export TOPDIR	:=	$(CURDIR)
+export OUTPUT   := $(CURDIR)/$(TARGET)
+export TOPDIR   := $(CURDIR)
 
-export VPATH	:=	$(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) \
-			$(foreach dir,$(DATA),$(CURDIR)/$(dir))
+export VPATH    := $(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) \
+                   $(foreach dir,$(DATA),$(CURDIR)/$(dir))
 
-export DEPSDIR	:=	$(CURDIR)/$(BUILD)
+export DEPSDIR  := $(CURDIR)/$(BUILD)
 
-CFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
-CPPFILES	:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
-SFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
-BINFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.*)))
+CFILES          := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
+CPPFILES        := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
+SFILES          := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
+BINFILES        := $(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.*)))
 
-#---------------------------------------------------------------------------------
-# use CXX for linking C++ projects, CC for C projects
-#---------------------------------------------------------------------------------
 ifeq ($(strip $(CPPFILES)),)
-	export LD	:=	$(CC)
+        export LD       := $(CC)
 else
-	export LD	:=	$(CXX)
+        export LD       := $(CXX)
 endif
 
-export OFILES_BIN	:=	$(addsuffix .o,$(BINFILES))
-export OFILES_SRC	:=	$(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
-export OFILES 	:=	$(OFILES_BIN) $(OFILES_SRC)
-export HFILES_BIN	:=	$(addsuffix .h,$(subst .,_,$(BINFILES)))
+export OFILES_BIN       := $(addsuffix .o,$(BINFILES))
+export OFILES_SRC       := $(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
+export OFILES   := $(OFILES_BIN) $(OFILES_SRC)
+export HFILES_BIN       := $(addsuffix .h,$(subst .,_,$(BINFILES)))
 
-export INCLUDE	:=	$(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
-			$(foreach dir,$(LIBDIRS),-I$(dir)/include) \
-			-I$(CURDIR)/$(BUILD)
+export INCLUDE  := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
+                   $(foreach dir,$(LIBDIRS),-I$(dir)/include) \
+                   -I$(CURDIR)/$(BUILD)
 
-export LIBPATHS	:=	$(foreach dir,$(LIBDIRS),-L$(dir)/lib)
-
-ifeq ($(strip $(CONFIG_JSON)),)
-	jsons := $(wildcard *.json)
-	ifneq (,$(findstring $(TARGET).json,$(jsons)))
-		export APP_JSON := $(TOPDIR)/$(TARGET).json
-	else
-		ifneq (,$(findstring config.json,$(jsons)))
-			export APP_JSON := $(TOPDIR)/config.json
-		endif
-	endif
-else
-	export APP_JSON := $(TOPDIR)/$(CONFIG_JSON)
-endif
+export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
 .PHONY: $(BUILD) clean all
 
@@ -113,28 +91,42 @@ $(BUILD):
 
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).nro
+	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).nro exefs.nsp
 
 #---------------------------------------------------------------------------------
 else
-.PHONY:	all
+#---------------------------------------------------------------------------------
 
-DEPENDS	:=	$(OFILES:.o=.d)
+.PHONY: all
+
+DEPENDS := $(OFILES_SRC:.o=.d)
 
 #---------------------------------------------------------------------------------
-# main targets — build .nro (standard homebrew applet)
+# main targets
 #---------------------------------------------------------------------------------
-all	:	$(OUTPUT).nro
+all : $(OUTPUT).nro $(OUTPUT).elf
 
-$(OUTPUT).nro	:	$(OUTPUT).elf $(OUTPUT).nacp $(OUTPUT).icon
+$(OUTPUT).nro : $(OUTPUT).elf $(OUTPUT).nacp $(OUTPUT).icon
 
-$(OUTPUT).elf	:	$(OFILES)
+$(OUTPUT).elf : $(OFILES)
 
-$(OFILES_SRC)	: $(HFILES_BIN)
+$(OFILES_SRC) : $(HFILES_BIN)
 
-%.bin.o	%_bin.h :	%.bin
+%.bin.o %_bin.h : %.bin
 	@echo $(notdir $<)
 	@$(bin2o)
+
+#---------------------------------------------------------------------------------
+# Build exefs.nsp from .elf + .npdm
+#---------------------------------------------------------------------------------
+$(OUTPUT).nsp : $(OUTPUT).elf exefs/main.npdm
+	@echo "  NPDMTOOL  exefs/main.npdm"
+	@npdmtool exefs/main.npdm build/$(TARGET).npdm
+	@echo "  ELF2NSP   $@"
+	@elf2nsp $(OUTPUT).elf build/$(TARGET).npdm $@
+
+exefs.nsp : $(OUTPUT).nsp
+	@cp $< $@
 
 -include $(DEPENDS)
 
