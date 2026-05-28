@@ -22,12 +22,18 @@ jobs:
         run: |
           make clean
           make -j$(nproc)
+          echo "=== Output files ==="
+          ls -la *.nsp *.elf exefs.nsp 2>/dev/null || true
 
-      - name: List output
-        run: ls -la exefs.nsp
+      - name: Prepare exefs.nsp
+        run: |
+          if [ -f pctltcp-sysmodule.nsp ]; then
+            cp pctltcp-sysmodule.nsp exefs.nsp
+            echo "Copied pctltcp-sysmodule.nsp -> exefs.nsp"
+          fi
+          ls -la exefs.nsp 2>/dev/null || echo "exefs.nsp not found!"
 
       - name: Upload artifact
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pctltcp-sysmodule
