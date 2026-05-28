@@ -29,5 +29,5 @@ jobs:
         with:
           name: pctltcp-sysmodule
           path: |
-            pctltcp-sysmodule.nro
             exefs.nsp
+            exefs/
