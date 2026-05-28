@@ -23,11 +23,12 @@ jobs:
           make clean
           make -j$(nproc)
 
+      - name: List output
+        run: ls -la exefs.nsp
+
       - name: Upload artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pctltcp-sysmodule
-          path: |
-            exefs.nsp
-            exefs/
+          path: exefs.nsp
