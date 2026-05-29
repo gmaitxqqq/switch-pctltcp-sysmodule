@@ -99,8 +99,12 @@ void userAppExit(void) {
     smExit();
 }
 
-/* ---- sysmodule entry point (switch_sysmodule.specs) ---- */
-void userAppMain(void) {
+/* ---- sysmodule entry point (switch.specs / boot2 NSP) ---- */
+int main(int argc, char **argv) {
+
+    /* App hooks (called by switch.specs CRT0) */
+    userAppInit();
+    atexit(userAppExit);
 
     mkdir("/switch", 0777);
     mkdir("/switch/pctltcp-sysmodule", 0777);
@@ -111,7 +115,7 @@ void userAppMain(void) {
     if (R_FAILED(rc)) {
         log_msg("FATAL: init_services failed!");
         userAppExit();
-        return;
+        return 1;
     }
 
     http_server_start();
@@ -165,5 +169,5 @@ void userAppMain(void) {
         }
     }
 
-    return;
+    return 0;
 }
