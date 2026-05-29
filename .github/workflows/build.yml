@@ -19,23 +19,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install switch-tools (provides elf2nsp)
-        run: |
-          dkp-pacman -Sy --noconfirm switch-tools
-
-      - name: Build
+      - name: Build ELF
         run: |
           make clean
           make -j$(nproc)
-          echo "=== Output files ==="
-          ls -la *.nsp *.elf 2>/dev/null || true
+
+      - name: Convert ELF to NSP
+        run: |
+          python3 elf2nsp.py pctltcp-sysmodule.elf pctltcp-sysmodule.nsp
 
       - name: List output
         run: |
-          echo "=== All .nsp files ==="
-          find . -name "*.nsp" -ls 2>/dev/null || echo "No .nsp files found"
-          echo "=== Build dir ==="
-          ls -la build/ 2>/dev/null || true
+          echo "=== Output files ==="
+          ls -la *.nsp *.elf 2>/dev/null || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
