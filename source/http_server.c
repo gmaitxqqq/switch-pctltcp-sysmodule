@@ -77,15 +77,21 @@ static void api_status(int fd)
 {
     u64 remaining_ns = 0;
     u32 daily_limit  = 0;
+    u32 remaining_min = 0;
+    u32 played_min    = 0;
+    int today = 0;
 
-    pctl_get_remaining_time(&remaining_ns);
-    pctl_get_daily_limit_minutes(&daily_limit);
-
-    u32 remaining_min = clamp_remaining_min(remaining_ns);
-    u32 played_min    = (daily_limit > remaining_min) ? (daily_limit - remaining_min) : 0;
+    Result rc = pctl_init();
+    if (R_SUCCEEDED(rc)) {
+        pctl_get_remaining_time(&remaining_ns);
+        pctl_get_daily_limit_minutes(&daily_limit);
+        remaining_min = clamp_remaining_min(remaining_ns);
+        played_min    = (daily_limit > remaining_min) ? (daily_limit - remaining_min) : 0;
+        today = pctl_get_today_day();
+        pctl_exit();
+    }
 
     char json[256];
-    int today = pctl_get_today_day();
     static const char *day_names[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
     snprintf(json, sizeof(json),
         "{\"daily_limit_min\":%u,\"remaining_min\":%u,\"played_min\":%u,\"today\":%d,\"today_name\":\"%s\",\"version\":\"v1.3\"}",
@@ -103,7 +109,12 @@ static void api_allow(int fd, const char *body)
         if (p) allow_min = (unsigned int)atoi(p + 1);
     }
 
-    Result rc;
+    Result rc = pctl_init();
+    if (R_FAILED(rc)) {
+        http_send(fd, "200 OK", "application/json", "{\"success\":0,\"error\":\"pctl_init_failed\"}");
+        return;
+    }
+
     int today = pctl_get_today_day();
 
     if (allow_min == 0) {
@@ -118,6 +129,8 @@ static void api_allow(int fd, const char *body)
         rc = pctl_set_day_limit_minutes(today, new_limit);
     }
 
+    pctl_exit();
+
     char json[128];
     snprintf(json, sizeof(json),
         "{\"success\":%d}",
@@ -126,7 +139,6 @@ static void api_allow(int fd, const char *body)
     http_send(fd, "200 OK", "application/json", json);
 }
 
-/* ------------------------------------------------------------------ */
 /* Embedded Web UI                                                     */
 /* ------------------------------------------------------------------ */
 static const char *WEB_HTML =

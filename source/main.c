@@ -316,13 +316,6 @@ static Result init_services(void) {
 
     log_msg("pctltcp-sysmodule starting...");
 
-    /* Parental control service */
-    rc = pctl_init();
-    log_result("pctl_init", rc);
-    if (R_FAILED(rc)) {
-        log_msg("FATAL: pctl_init failed, cannot continue.");
-        return rc;
-    }
 
     /* PSC power state monitor (non-fatal but very useful) */
     rc = psc_monitor_init();
@@ -335,7 +328,6 @@ static Result init_services(void) {
 static void exit_services(void) {
     net_cleanup();
     psc_monitor_exit();
-    if (pctl_is_initialized()) pctl_exit();
     log_msg("pctltcp-sysmodule exiting.");
 }
 
