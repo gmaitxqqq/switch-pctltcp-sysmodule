@@ -11,7 +11,7 @@
     "pool_partition": 2,
     "is_64_bit": true,
     "signature_key_generation": 0,
-    "address_space_type": 3,
+    "address_space_type": 1,
     "optimize_memory_allocation": false,
     "disable_device_address_space_merge": true,
     "enable_alias_region_extra_size": false,
@@ -21,11 +21,62 @@
         "permissions": "0xFFFFFFFFFFFFFFFF"
     },
     "service_access": [
-        "*"
+        "sm:",
+        "fs:",
+        "psc:m",
+        "set:sys",
+        "nifm:s",
+        "nifm:u",
+        "pctl:s",
+        "pctl:r",
+        "pctl:a",
+        "bsd:u",
+        "bsd:s",
+        "sfdnsres",
+        "acc:u0",
+        "acc:u1",
+        "time:s",
+        "time:u",
+        "socket:proxy",
+        "spl:",
+        "pm:info",
+        "lr",
+        "apm",
+        "hid",
+        "hid:sys",
+        "vi:s",
+        "vi:u",
+        "vi:m",
+        "appletAE",
+        "appletOE",
+        "am",
+        "ns:am",
+        "ns:dev",
+        "fatal:u",
+        "ro",
+        "ldr",
+        "pl:u",
+        "pl:s",
+        "ptm:u",
+        "lbl",
+        "bpc",
+        "bpc:c",
+        "psm",
+        "spsm",
+        "gpio",
+        "i2c",
+        "pinmux",
+        "hwopus",
+        "audout:u",
+        "audren:u",
+        "audin:u",
+        "codec",
+        "clkr",
+        "dispdrv",
+        "fssrv:sdmc",
+        "fsp-srv"
     ],
-    "service_host": [
-        "*"
-    ],
+    "service_host": [],
     "kernel_capabilities": [
         {
             "type": "kernel_flags",
@@ -111,7 +162,7 @@
         },
         {
             "type": "handle_table_size",
-            "value": 128
+            "value": 512
         }
     ]
 }

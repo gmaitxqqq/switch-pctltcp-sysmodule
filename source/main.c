@@ -41,17 +41,20 @@ void __libnx_initheap(void) {
     fake_heap_end   = inner_heap + sizeof(inner_heap);
 }
 
-/* ---- __appInit — follow sys-con pattern exactly ----
+/* ---- __appInit — initialize all needed services ----
  *
- * CRITICAL: Initialize ALL services here, not in main().
- * The CRT0 expects __appInit to set up everything.
+ * Based on sys-con pattern but with KEY difference:
+ * We do NOT call smExit() here because we need SM to remain
+ * available for nifm/pctl initialization later in main().
+ * (sys-con calls smExit() because it initializes ALL services
+ * here; we can't do that because nifm/network may not be
+ * available at boot2 time.)
+ *
  * Key steps:
  * 1. smInitialize() first (needed for all other services)
  * 2. setsysInitialize() → get firmware version → hosversionSet()
- *    (libnx functions depend on hosversion being set correctly)
- * 3. Initialize all needed services
- * 4. smExit() BEFORE fsdevMountSdmc() (release SM session)
- * 5. fsdevMountSdmc() last
+ * 3. Initialize services available at boot time
+ * 4. smExit() is called in __appExit() instead
  */
 Result __appInit(void) {
     Result rc;
@@ -76,9 +79,7 @@ Result __appInit(void) {
     rc = fsInitialize();
     if (R_FAILED(rc)) return rc;
 
-    /* Release SM session — fsdevMountSdmc re-connects internally */
-    smExit();
-
+    /* DO NOT call smExit() here! We need SM for nifm/pctl later. */
     rc = fsdevMountSdmc();
     if (R_FAILED(rc)) return rc;
 
@@ -90,6 +91,7 @@ void __appExit(void) {
     fsdevUnmountAll();
     fsExit();
     pscmExit();
+    smExit();  /* SM is kept alive for the entire process lifetime */
 }
 
 /* ---- Constants ---- */

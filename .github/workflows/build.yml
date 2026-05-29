@@ -46,6 +46,14 @@ jobs:
           exit 1
         fi
 
+        # Copy toolbox.json — required for Hekate/DeepSea toolbox visibility
+        if [ -f "toolbox.json" ]; then
+          cp "toolbox.json" "${DIST}/toolbox.json"
+          echo "toolbox.json: OK"
+        else
+          echo "WARNING: toolbox.json not found (Hekate won't show this module)"
+        fi
+
         # Create boot2 flag for auto-start
         touch "${FLAGS}/boot2.flag"
 
