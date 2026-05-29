@@ -2,7 +2,7 @@
 
 开机自动启动的后台系统服务（boot2 sysmodule），通过浏览器访问 Switch IP 即可设置家长控制时间。无需手动打开任何应用，开机即用。
 
-**版本**：v1.7 | **端口**：8081 | **固件**：兼容 Atmosphere 22.1.0+
+**版本**：v1.7d | **端口**：8081 | **固件**：兼容 Atmosphere 22.1.0+
 
 ---
 
@@ -147,6 +147,8 @@ make clean && make        # 输出 pctltcp-sysmodule.nsp
 
 | 版本 | 变更 |
 |------|------|
+| **v1.7d** | `net_init()` 等待 IP 就位后再返回（最长 30 秒），修复启动 5 秒即误判"Network lost"的 bug |
+| **v1.7b** | 修复启动卡死（`nifmGetCurrentIpAddress()` 在 `nifmInitialize()` 之前调用） |
 | **v1.7** | **主动网络检测（用户建议）**：息屏网络断开 → 自动停止 HTTP server；亮屏网络恢复 → 自动重启；彻底解决 v1.6 仍存在的"日志停死"问题（pthread_join 死锁） |
 | **v1.6** | **彻底修复长时间息屏后 HTTP 服务无法恢复（0x559 错误）**：bsd:ux 在整个进程生命周期内保持存活，不再重复调用 `socketExit()`/`socketInitialize()` |
 | **v1.5** | 增加 `socketInitialize` 失败重试冷却时间，尝试缓解 0x559 错误（未彻底解决） |
