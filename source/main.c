@@ -232,7 +232,9 @@ static Result net_init(void) {
         snprintf(msg, sizeof(msg), "Web UI: http://%s:%d", ip, HTTP_PORT);
         log_msg(msg);
     } else {
-        log_msg("Web UI: http://<IP not yet assigned>:" STRINGIZE(HTTP_PORT));
+        char msg[256];
+        snprintf(msg, sizeof(msg), "Web UI: http://<IP not yet assigned>:%d", HTTP_PORT);
+        log_msg(msg);
     }
     return 0;
 }
