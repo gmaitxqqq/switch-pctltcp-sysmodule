@@ -1,6 +1,7 @@
 #---------------------------------------------------------------------------------
-# Makefile for switch-pctltcp-sysmodule (boot2 sysmodule)
-# Installs to: sd:/atmosphere/contents/0100000000000023/exefs.nsp
+# Makefile for switch-pctltcp-sysmodule (sysmodule)
+# Install: sd:/atmosphere/sysmodules/pctltcp-sysmodule.sts
+# Build:   make -> pctltcp-sysmodule.sts
 #---------------------------------------------------------------------------------
 
 ifeq ($(strip $(DEVKITPRO)),)
@@ -12,19 +13,20 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 #---------------------------------------------------------------------------------
 # TARGET is the name of the output
-# BUILD is the directory where object files & intermediate files will be placed
+# BUILD  is the directory where object files & intermediate files will be placed
 # SOURCES is a list of directories containing source code
-# DATA is a list of directories containing data files
+# DATA    is a list of directories containing data files
 # INCLUDES is a list of directories containing header files
 #---------------------------------------------------------------------------------
 TARGET		:= pctltcp-sysmodule
 
-# boot2 sysmodule - APPLET_TYPE := 4 -> userAppMain() entry
-APPLET_TYPE	:= 4
-NODEFAULTFW	:= 1
+# sysmodule: use switch_sysmodule.specs + userAppMain() entry
+# Do NOT set APPLET_TYPE - let the hardcoded LDFLAGS handle the specs file.
+APPLET_TYPE	:=
+NODEFAULTFW	:=
 
 BUILD		:= build
-SOURCES		:= source
+SOURCES	:= source
 DATA		:= data
 INCLUDES	:= include
 
@@ -34,7 +36,7 @@ CONFIG_JSON	:= pctltcp-sysmodule.json
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
-ARCH		:= -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIE
+ARCH		:= -march=armv8-a -mtune=cortex-a57 -mtp=soft -fpie
 
 CFLAGS		:= -g -Wall -O2 -ffunction-sections \
 		   $(ARCH) $(DEFINES)
@@ -45,7 +47,8 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 
 ASFLAGS		:= -g $(ARCH)
 
-LDFLAGS	= -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+# Use switch_sysmodule.specs (verified present in devkitPro Docker image)
+LDFLAGS	= -specs=$(DEVKITPRO)/libnx/switch_sysmodule.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
 LIBS		:= -lnx
 
@@ -127,12 +130,12 @@ else
 DEPS		:= $(OBJFILES:.o=.d)
 
 #---------------------------------------------------------------------------------
-# main targets - build .nsp for boot2 sysmodule
+# main targets - build .sts for sysmodule
 #---------------------------------------------------------------------------------
-all	:	$(OUTPUT).nsp
+all	:	$(OUTPUT).sts
 
-# .nsp target: ELF -> NSP (for boot2 / atmosphere/contents/)
-$(OUTPUT).nsp	:	$(OUTPUT).elf
+# .sts target: ELF -> STS (for atmosphere/sysmodules/)
+$(OUTPUT).sts	:	$(OUTPUT).elf
 	@echo building ... $(notdir $@)
 	@$(NOFDEFAULTS) $< $@
 

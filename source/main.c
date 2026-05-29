@@ -1,6 +1,6 @@
-// pctltcp-sysmodule - Switch Parental Control Web Server (boot2 sysmodule)
-// Build: make -> pctltcp-sysmodule.nsp
-// Install: sd:/atmosphere/contents/0100000000000023/exefs.nsp
+// pctltcp-sysmodule - Switch Parental Control Web Server (sysmodule)
+// Build: make -> pctltcp-sysmodule.sts
+// Install: sd:/atmosphere/sysmodules/pctltcp-sysmodule.sts
 
 #include <switch.h>
 #include <stdio.h>
@@ -16,7 +16,7 @@
 #define LOG_FILE "/switch/pctltcp-sysmodule/sysmodule.log"
 #define MAX_LOG_SIZE (100 * 1024)
 
-/* ---- App hooks (called by switch.specs CRT0) ---- */
+/* ---- App hooks (called by switch_sysmodule.specs CRT0) ---- */
 void userAppInit(void);
 void userAppExit(void);
 
@@ -69,6 +69,7 @@ static Result init_services(void) {
     Result rc = pctl_init();
     log_result("pctl_init", rc);
 
+    /* Init sockets with retry (network may not be up yet) */
     rc = -1;
     for (int i = 0; i < 60; i++) {
         rc = socketInitializeDefault();
@@ -84,8 +85,9 @@ static Result init_services(void) {
 
     rc = nifmInitialize(NifmServiceType_User);
     log_result("nifmInit", rc);
+    /* Non-fatal if this fails */
 
-    return 0;
+    return rc;
 }
 
 /* ---- App hooks ---- */
@@ -95,16 +97,25 @@ void userAppInit(void) {
 }
 
 void userAppExit(void) {
+    if (http_server_is_running())
+        http_server_stop();
+    if (pctl_is_initialized())
+        pctl_exit();
+    nifmExit();
+    socketExit();
     setsysExit();
     smExit();
 }
 
-/* ---- sysmodule entry point (APPLET_TYPE=4 -> userAppMain) ---- */
+/* ---- sysmodule entry point (switch_sysmodule.specs -> userAppMain) ---- */
 void userAppMain(void) {
+    /* App hooks are called automatically by CRT0 */
+    /* userAppInit() is called before this function */
 
     mkdir("/switch", 0777);
     mkdir("/switch/pctltcp-sysmodule", 0777);
 
+    /* Wait for system to be ready */
     svcSleepThread(15000000000ULL);
 
     Result rc = init_services();
@@ -116,6 +127,7 @@ void userAppMain(void) {
     http_server_start();
     log_msg(http_server_is_running() ? "HTTP server started." : "HTTP server start FAILED.");
 
+    /* Log IP address */
     char ip[64] = {0};
     u32 ipaddr = 0;
     if (R_SUCCEEDED(nifmGetCurrentIpAddress(&ipaddr)) && ipaddr != 0) {
@@ -127,7 +139,7 @@ void userAppMain(void) {
         log_msg(msg);
     }
 
-    /* Main loop */
+    /* Main loop - keep running forever */
     u64 loop = 0;
     char last_ip[64] = {0};
     u64 last_ip_check = 0;
@@ -136,12 +148,14 @@ void userAppMain(void) {
         svcSleepThread(1000000000ULL);
         loop++;
 
+        /* Restart HTTP server if it died */
         if ((loop % 30 == 0) && !http_server_is_running()) {
             log_msg("WARNING: HTTP server down, restarting...");
             http_server_start();
             log_msg("HTTP server restarted.");
         }
 
+        /* Check for IP change every 5 minutes */
         if (loop - last_ip_check >= 300) {
             char new_ip[64] = {0};
             u32 a = 0;
@@ -163,6 +177,4 @@ void userAppMain(void) {
             last_ip_check = loop;
         }
     }
-
-    return;
 }
