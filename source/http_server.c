@@ -21,8 +21,8 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 
-/* Forward declaration — defined in main.c */
-extern void log_msg(const char *fmt, ...);
+/* Forward declaration — defined in main.c. NOT variadic! */
+extern void log_msg(const char *msg);
 
 /* ------------------------------------------------------------------ */
 /* State                                                               */
@@ -353,7 +353,7 @@ void http_server_start(void)
     s_thread_active = true;
     pthread_attr_destroy(&attr);
 
-    log_msg("http_server_start: OK (fd=%d, gen=%d)", s_server_fd, s_generation);
+    log_msg("http_server_start: OK");
 }
 
 void http_server_stop(void)
