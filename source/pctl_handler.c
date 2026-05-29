@@ -282,18 +282,35 @@ Result pctl_set_daily_limit_minutes(u32 minutes)
 
 /**
  * Get today's day-of-week in Switch convention: 0=Sun, 1=Mon, ..., 6=Sat.
- * Falls back to 0 (Sun) on error.
+ * Uses Switch native timeGetCurrentTime() for reliability in sysmodule context.
+ * Without timeInitialize(), C time() may return epoch 0 which is
+ * Thursday 1970-01-01 (tm_wday=4), causing all operations to target
+ * the wrong day. timeGetCurrentTime() talks directly to the time:u
+ * service and is always correct.
+ * Falls back to C time()/localtime(), then 0 (Sun).
  */
 int pctl_get_today_day(void)
 {
-    time_t t = time(NULL);
-    if (t == (time_t)-1)
-        return 0;
-    struct tm *tm_info = localtime(&t);
-    if (!tm_info)
-        return 0;
-    /* tm_wday: 0=Sun, 1=Mon, ..., 6=Sat — same as Switch day convention */
-    return tm_info->tm_wday;
+    /* Primary: use Switch native time service (most reliable in sysmodule) */
+    u64 now_posix = 0;
+    Result rc = timeGetCurrentTime(TimeType_LocalSystemClock, &now_posix);
+    if (R_SUCCEEDED(rc) && now_posix > 946684800ULL) {  /* after 2000-01-01 sanity check */
+        time_t t = (time_t)now_posix;
+        struct tm *tm_info = localtime(&t);
+        if (tm_info)
+            return tm_info->tm_wday;  /* 0=Sun..6=Sat, matches Switch convention */
+    }
+
+    /* Fallback: C standard library (works after timeInitialize()) */
+    time_t t2 = time(NULL);
+    if (t2 != (time_t)-1 && t2 > 946684800ULL) {
+        struct tm *tm_info = localtime(&t2);
+        if (tm_info)
+            return tm_info->tm_wday;
+    }
+
+    /* Last resort: return Sunday (safe default) */
+    return 0;
 }
 
 Result pctl_get_daily_limit_minutes(u32 *minutes)

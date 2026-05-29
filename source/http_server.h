@@ -7,7 +7,7 @@
 
 #include <switch.h>
 
-#define HTTP_PORT  8080
+#define HTTP_PORT  8081
 
 void http_server_start(void);
 void http_server_stop(void);

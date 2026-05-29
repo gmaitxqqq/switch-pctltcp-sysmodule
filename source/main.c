@@ -57,6 +57,15 @@ Result __appInit(void) {
     rc = fsInitialize();
     if (R_FAILED(rc)) return rc;
 
+    /* Time service - REQUIRED for localtime()/time() to work correctly
+     * in sysmodule context. Without this, time(NULL) returns epoch 0
+     * (Thursday 1970-01-01), causing pctl_get_today_day() to always
+     * return 4 (Thursday) instead of the actual day. */
+    rc = timeInitialize();
+    if (R_FAILED(rc)) {
+        /* Non-fatal: pctl day-of-week may be wrong, but module can still run */
+    }
+
     /* DO NOT call smExit() here! We need SM for nifm/pctl later. */
     rc = fsdevMountSdmc();
     if (R_FAILED(rc)) return rc;
@@ -68,6 +77,7 @@ Result __appInit(void) {
 void __appExit(void) {
     fsdevUnmountAll();
     fsExit();
+    timeExit();
     pscmExit();
     smExit();  /* SM is kept alive for the entire process lifetime */
 }
