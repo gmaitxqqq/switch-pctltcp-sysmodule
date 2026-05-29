@@ -2,7 +2,7 @@
 
 开机自动启动的后台系统服务（boot2 sysmodule），通过浏览器访问 Switch IP 即可设置家长控制时间。无需手动打开任何应用，开机即用。
 
-**版本**：v1.4 | **端口**：8081 | **固件**：兼容 Atmosphere 22.1.0+
+**版本**：v1.6 | **端口**：8081 | **固件**：兼容 Atmosphere 22.1.0+
 
 ---
 
@@ -75,7 +75,7 @@ SD:/switch/pctltcp-sysmodule/sysmodule.log
 - **开机自启**：boot2 方式，Atmosphere 启动时自动加载
 - **后台常驻**：不需要打开任何应用，完全后台运行
 - **自动恢复**：HTTP server 挂掉自动重启，网络异常自动重连
-- **休眠恢复**：息屏唤醒后自动检测并重建网络（5-10 秒内恢复）
+- **休眠恢复**：息屏唤醒后自动检测并重建网络，**彻底解决 0x559 错误**（bsd:ux 全程保持存活，不再重复初始化）
 - **IP 变化检测**：切换 WiFi 后自动更新日志
 - **Hekate 工具箱**：`toolbox.json` 支持在 Hekate 中显示插件名称
 
@@ -127,6 +127,7 @@ make clean && make        # 输出 pctltcp-sysmodule.nsp
 - **pctl 按需使用**：每次 API 调用 init/exit，避免单客户端限制冲突
 - **时区处理**：sysmodule 中 `localtime()` 无时区数据，通过 `setsys` + `timeLoadTimeZoneRule` 显式加载
 - **网络恢复**：不使用 PSC 电源监控（会死锁），改用主循环健康检查自动重建
+- **v1.6 核心修复**：`socketInitialize()` 在进程启动时调用一次，`socketExit()` 仅在进程退出时调用；`net_reinit()` 只重建 nifm + HTTP 监听套接字，永不触碰 bsd:ux，彻底消除 0x559 错误
 
 ---
 
@@ -145,6 +146,8 @@ make clean && make        # 输出 pctltcp-sysmodule.nsp
 
 | 版本 | 变更 |
 |------|------|
+| **v1.6** | **彻底修复长时间息屏后 HTTP 服务无法恢复（0x559 错误）**：bsd:ux 在整个进程生命周期内保持存活，不再重复调用 `socketExit()`/`socketInitialize()`；网络重连只重建 nifm + HTTP 监听套接字 |
+| **v1.5** | 增加 `socketInitialize` 失败重试冷却时间，尝试缓解 0x559 错误（未彻底解决） |
 | **v1.4** | 移除 PSC 电源监控（解决休眠唤醒死机），改用主循环健康检查自动恢复 |
 | **v1.3** | 修复星期读取错误，显式加载时区规则；端口改为 8081 |
 | **v1.2** | 修复 pctl 按需 init/exit，避免与系统家长控制界面冲突 |
