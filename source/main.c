@@ -186,7 +186,7 @@ static Result net_init(void) {
     if (waited >= 30 || R_FAILED(rc) || ipaddr == 0) {
         log_msg("IP address not available after 30 seconds, rc=0x%X, ip=%08X", rc, ipaddr);
         net_cleanup();
-        return MAKE_RESULT(Module_Custom, 1);
+        return MAKERESULT(Module_Custom, 1);
     }
 
     log_msg("IP address acquired: %d.%d.%d.%d",

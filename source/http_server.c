@@ -291,9 +291,8 @@ Result http_server_start(void)
     struct sockaddr_in addr;
     int optval = 1;
 
-    s_server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (s_server_fd < 0) {
-        return MAKE_RESULT(Module_Custom, 1);
+        return MAKERESULT(Module_Custom, 1);
     }
 
     setsockopt(s_server_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
@@ -306,13 +305,13 @@ Result http_server_start(void)
     if (bind(s_server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         close(s_server_fd);
         s_server_fd = -1;
-        return MAKE_RESULT(Module_Custom, 2);
+        return MAKERESULT(Module_Custom, 2);
     }
 
     if (listen(s_server_fd, 4) < 0) {
         close(s_server_fd);
         s_server_fd = -1;
-        return MAKE_RESULT(Module_Custom, 3);
+        return MAKERESULT(Module_Custom, 3);
     }
 
     s_running = true;
