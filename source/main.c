@@ -3,7 +3,8 @@
 // Background sysmodule: auto-starts at boot, runs forever.
 // HTTP server on port 8080 with embedded mobile Web UI.
 //
-// Install: sd:/atmosphere/contents/0100000000000023/exefs.nsp
+// Build:  make -> pctltcp-sysmodule.sts
+// Install: sd:/atmosphere/sysmodules/pctltcp-sysmodule.sts
 // =================================================================
 
 #include <switch.h>
@@ -16,22 +17,16 @@
 #include "pctl_handler.h"
 #include "http_server.h"
 
-// ---- Log file (no console in sysmodule) ----
+// ---- Log file (no console in sysmodule) ---
 #define LOG_FILE "/switch/pctltcp-sysmodule/sysmodule.log"
 #define MAX_LOG_SIZE (100 * 1024)
 
-// ---- Sysmodule boilerplate ----
-u32 __nx_applet_type = AppletType_None;
+// ---- Sysmodule entry: userAppInit/Main/Exit (switch_sysmodule.specs) ---
+void userAppInit(void);
+void userAppMain(void);
+void userAppExit(void);
 
-static u8 _heap[0x00480000];
-void __libnx_initheap(void) {
-    extern void *fake_heap_start;
-    extern void *fake_heap_end;
-    fake_heap_start = _heap;
-    fake_heap_end   = _heap + sizeof(_heap);
-}
-
-// ---- Logging ----
+// ---- Logging ---
 static void rotate_log_if_needed(void) {
     FILE *f = fopen(LOG_FILE, "r");
     if (f) {
@@ -66,7 +61,7 @@ static void log_result(const char *ctx, Result rc) {
     log_msg(buf);
 }
 
-// ---- IP to string (libnx has no inet_ntoa) ----
+// ---- IP to string (libnx has no inet_ntoa) ---
 static void ip_to_str(u32 ip, char *buf, size_t bufsize) {
     snprintf(buf, bufsize, "%d.%d.%d.%d",
              (int)((ip >>  0) & 0xFF),
@@ -75,7 +70,7 @@ static void ip_to_str(u32 ip, char *buf, size_t bufsize) {
              (int)((ip >> 24) & 0xFF));
 }
 
-// ---- Service init ----
+// ---- Service init ---
 static Result init_services(void) {
     // Init pctl (best-effort, HTTP UI still works without it)
     Result rc = pctl_init();
@@ -90,8 +85,8 @@ static Result init_services(void) {
     }
     log_result("socketInit", rc);
     if (R_FAILED(rc)) {
-        if (pctlIsInitialized())
-            pctlExit();
+        if (pctl_is_initialized())
+            pctl_exit();
         return rc;
     }
 
@@ -108,28 +103,28 @@ static void exit_services(void) {
     http_server_stop();
     nifmExit();
     socketExit();
-    if (pctlIsInitialized())
-        pctlExit();
+    if (pctl_is_initialized())
+        pctl_exit();
     log_msg("Stopped.");
 }
 
-// ---- Sysmodule entry points ----
-void __appInit(void) {
+// ---- Sysmodule entry points ---
+void userAppInit(void) {
     smInitialize();
     setsysInitialize();
 }
 
-void __appExit(void) {
+void userAppExit(void) {
     setsysExit();
     smExit();
 }
 
-int main(void) {
+void userAppMain(void) {
     // Wait for system to be ready
     svcSleepThread(15000000000ULL); // 15s
 
     // Get firmware version
-    if (hosversionGet() == 0) {
+    {
         Result rc = setsysInitialize();
         if (R_SUCCEEDED(rc)) {
             SetSysFirmwareVersion fw;
@@ -143,7 +138,7 @@ int main(void) {
     Result rc = init_services();
     if (R_FAILED(rc)) {
         log_msg("FATAL: init_services failed!");
-        return 1;
+        return;
     }
 
     // Start HTTP server (port 8080)
@@ -156,9 +151,11 @@ int main(void) {
     if (R_SUCCEEDED(nifmGetCurrentIpAddress(&ipaddr)) && ipaddr != 0) {
         ip_to_str(ipaddr, ip, sizeof(ip));
     }
-    char msg[256];
-    snprintf(msg, sizeof(msg), "HTTP server running on http://%s:%d", ip, HTTP_PORT);
-    log_msg(msg);
+    {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "HTTP server running on http://%s:%d", ip, HTTP_PORT);
+        log_msg(msg);
+    }
 
     // Main loop: run forever, health check every 30s
     u64 loop = 0;
@@ -189,9 +186,11 @@ int main(void) {
                          last_ip[0] ? last_ip : "(none)", new_ip);
                 log_msg(m);
                 strcpy(last_ip, new_ip);
-                char u[256];
-                snprintf(u, sizeof(u), "Web UI: http://%s:%d", new_ip, HTTP_PORT);
-                log_msg(u);
+                {
+                    char u[256];
+                    snprintf(u, sizeof(u), "Web UI: http://%s:%d", new_ip, HTTP_PORT);
+                    log_msg(u);
+                }
             }
             last_ip_check = loop;
         }
@@ -199,5 +198,4 @@ int main(void) {
 
     // Unreachable, but kept for completeness
     exit_services();
-    return 0;
 }
