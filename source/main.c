@@ -15,7 +15,7 @@
 #include "http_server.h"
 
 #define PROGRAM_ID  0x0100000000000023ULL
-#define LOG_FILE    "/switch/pctltcp-sysmodule/sysmodule.log"
+#define LOG_FILE    "sdmc:/switch/pctltcp-sysmodule/sysmodule.log"
 #define MAX_LOG_SIZE (100 * 1024)
 
 /* ---- Logging ---- */
@@ -85,7 +85,7 @@ static Result init_services(void) {
     /* Step 2: FS initialization + mount SD card (for logging) */
     rc = fsInitialize();
     if (R_SUCCEEDED(rc)) {
-        rc = fsMountSdcard("sdmc");
+        rc = fsdevMountSdmc();
         if (R_SUCCEEDED(rc)) {
             /* Create log directory */
             mkdir("sdmc:/switch", 0777);
@@ -136,7 +136,7 @@ static void exit_services(void) {
     nifmExit();
     socketExit();
     setsysExit();
-    fsUnmountSdcard();
+    fsdevUnmountDevice("sdmc");
     fsExit();
     smExit();
 }
