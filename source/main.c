@@ -3,7 +3,7 @@
 // Background sysmodule: auto-starts at boot, runs forever.
 // HTTP server on port 8080 with embedded mobile Web UI.
 //
-// Install: copy .sts to /atmosphere/sysmodules/pctltcp-sysmodule.sts
+// Install: sd:/atmosphere/contents/0100000000000023/exefs.nsp
 // =============================================================
 
 #include <switch.h>
@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <time.h>
+#include <arpa/inet.h>
 
 #include "pctl_handler.h"
 #include "http_server.h"
@@ -69,7 +70,7 @@ static void log_result(const char *ctx, Result rc) {
 // ---- Service init ----
 static Result init_services(void) {
     // Init pctl (best-effort, HTTP UI still works without it)
-    Result rc = pctl_handler_init();
+    Result rc = pctl_init();
     log_result("pctl_init", rc);
 
     // Init sockets with retry (network may not be up yet)
@@ -81,7 +82,7 @@ static Result init_services(void) {
     }
     log_result("socketInit", rc);
     if (R_FAILED(rc)) {
-        if (pctl_handler_is_initialized()) pctl_handler_exit();
+        if (pctl_is_initialized()) pctl_exit();
         return rc;
     }
 
@@ -98,8 +99,8 @@ static void exit_services(void) {
     http_server_stop();
     nifmExit();
     socketExit();
-    if (pctl_handler_is_initialized())
-        pctl_handler_exit();
+    if (pctl_is_initialized())
+        pctl_exit();
     log_msg("Stopped.");
 }
 
@@ -139,7 +140,7 @@ int main(void) {
     // Start HTTP server (port 8080)
     http_server_start();
     log_result("http_server_start",
-               http_server_is_running() ? 0 : MAKERESULT(Module_Libnx, LibnxError_Internet));
+               http_server_is_running() ? 0 : MAKERESULT(Module_Libnx, LibnxError_NotInitialized));
 
     // Log IP
     char ip[64] = {0};
@@ -156,7 +157,7 @@ int main(void) {
     // Main loop: run forever, health check every 30s
     uint64_t loop = 0;
     char last_ip[64] = {0};
-    uint32_t last_ip_check = 0;
+    uint64_t last_ip_check = 0;
 
     while (1) {
         svcSleepThread(1000000000ULL); // 1s
