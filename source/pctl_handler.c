@@ -89,7 +89,7 @@ bool pctl_is_initialized(void)
 Result pctl_load_timezone(void)
 {
     Result rc;
-    char tz_name[0x24] = {0};
+    TimeLocationName tz_name = {0};
 
     /* Get the device timezone location name from settings */
     rc = setsysInitialize();
@@ -97,15 +97,15 @@ Result pctl_load_timezone(void)
         /* Can't get timezone name, day-of-week may be wrong */
         return rc;
     }
-    rc = setsysGetDeviceTimeZoneLocationName(tz_name, sizeof(tz_name));
+    rc = setsysGetDeviceTimeZoneLocationName(&tz_name);
     setsysExit();
 
-    if (R_FAILED(rc) || tz_name[0] == '\0') {
+    if (R_FAILED(rc) || tz_name.name[0] == '\0') {
         return rc;
     }
 
     /* Load the timezone rule from the time service */
-    rc = timeLoadTimeZoneRule((LocationName *)tz_name, &s_tz_rule);
+    rc = timeLoadTimeZoneRule(&tz_name, &s_tz_rule);
     if (R_SUCCEEDED(rc)) {
         s_tz_rule_loaded = true;
     }
@@ -354,7 +354,7 @@ int pctl_get_today_day(void)
 
         /* Method 2: Explicitly loaded timezone rule (most reliable in sysmodule) */
         if (s_tz_rule_loaded) {
-            rc = timeToCalendarTime(now_posix, &s_tz_rule, &cal, &additional);
+            rc = timeToCalendarTime(&s_tz_rule, now_posix, &cal, &additional);
             if (R_SUCCEEDED(rc)) {
                 return (int)additional.wday;
             }
