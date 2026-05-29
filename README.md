@@ -2,7 +2,7 @@
 
 开机自动启动的后台系统服务（boot2 sysmodule），通过浏览器访问 Switch IP 即可设置家长控制时间。无需手动打开任何应用，开机即用。
 
-**版本**：v1.7d | **端口**：8081 | **固件**：兼容 Atmosphere 22.1.0+
+**版本**：v1.4.1 | **端口**：8081 | **固件**：兼容 Atmosphere 22.1.0+
 
 ---
 
@@ -74,8 +74,9 @@ SD:/switch/pctltcp-sysmodule/sysmodule.log
 
 - **开机自启**：boot2 方式，Atmosphere 启动时自动加载
 - **后台常驻**：不需要打开任何应用，完全后台运行
-- **主动网络检测**（v1.7）：息屏网络断开时自动停止 HTTP server，亮屏网络恢复后自动重启，不再被动等死
-- **彻底解决 0x559 错误**（v1.6）：bsd:ux 全程保持存活，不再重复初始化
+- **息屏/亮屏自动恢复**（v1.4.1）：检测到息屏唤醒后，等待 WiFi 重连再自动重启 HTTP 服务，无需手动干预
+- **彻底解决 0x559 错误**：socket/nifm 只在进程启动时初始化一次，永不重复调用 socketExit/socketInitialize
+- **孤儿 fd 自动清理**：HTTP 线程异常退出后自动清理残留 socket，防止端口泄漏
 - **IP 变化检测**：切换 WiFi 后自动更新日志
 - **Hekate 工具箱**：`toolbox.json` 支持在 Hekate 中显示插件名称
 
@@ -98,7 +99,7 @@ SD:/atmosphere/contents/010000000000BD23/
 ```
 switch-pctltcp-sysmodule/
 ├── source/
-│   ├── main.c              # sysmodule 入口 + 网络健康检查循环
+│   ├── main.c              # sysmodule 入口 + 息屏检测 + 网络恢复循环
 │   ├── http_server.c/h     # HTTP 服务端 + 嵌入式 Web UI
 │   └── pctl_handler.c/h    # pctl IPC 封装 + 时区加载
 ├── pctltcp-sysmodule.json  # NPDM 权限配置
@@ -126,9 +127,11 @@ make clean && make        # 输出 pctltcp-sysmodule.nsp
 - **NPDM 权限**：`service_access: ["*"]`，`service_host: []`（空数组，非通配符）
 - **pctl 按需使用**：每次 API 调用 init/exit，避免单客户端限制冲突
 - **时区处理**：sysmodule 中 `localtime()` 无时区数据，通过 `setsys` + `timeLoadTimeZoneRule` 显式加载
-- **网络恢复**：主动检测网络状态（`nifmGetCurrentIpAddress`），离线立即停 HTTP server，在线才启动（v1.7）
-- **v1.6 核心修复**：`socketInitialize()` 在进程启动时调用一次，`socketExit()` 仅在进程退出时调用；`net_reinit()` 只重建 nifm + HTTP 监听套接字，永不触碰 bsd:ux，彻底消除 0x559 错误
-- **v1.7 核心修复**：`http_server_stop()` 使用 self-pipe 技巧唤醒 `select()`，彻底解决 `pthread_join()` 死锁导致主循环卡死的问题
+- **息屏检测**：主循环通过 `UserSystemClock` 时间跳跃（>5秒）检测息屏/唤醒事件
+- **WiFi 重连等待**：`http_restart()` 轮询 `nifmGetCurrentIpAddress()` 直到 IP 非 0，再额外等 2 秒 WLAN 稳定
+- **socket 只初始化一次**：`socketInitialize(&cfg)` 使用 `BsdServiceType_System`，进程生命周期内永不调用 `socketExit()`，彻底避免 0x559
+- **代际计数器**：`s_generation` 防止旧线程在重启后操作已失效的 socket fd
+- **孤儿 fd 清理**：`http_server_start()` 开头自动关闭残留 fd 并 join 孤儿线程
 
 ---
 
@@ -147,11 +150,7 @@ make clean && make        # 输出 pctltcp-sysmodule.nsp
 
 | 版本 | 变更 |
 |------|------|
-| **v1.7d** | `net_init()` 等待 IP 就位后再返回（最长 30 秒），修复启动 5 秒即误判"Network lost"的 bug |
-| **v1.7b** | 修复启动卡死（`nifmGetCurrentIpAddress()` 在 `nifmInitialize()` 之前调用） |
-| **v1.7** | **主动网络检测（用户建议）**：息屏网络断开 → 自动停止 HTTP server；亮屏网络恢复 → 自动重启；彻底解决 v1.6 仍存在的"日志停死"问题（pthread_join 死锁） |
-| **v1.6** | **彻底修复长时间息屏后 HTTP 服务无法恢复（0x559 错误）**：bsd:ux 在整个进程生命周期内保持存活，不再重复调用 `socketExit()`/`socketInitialize()` |
-| **v1.5** | 增加 `socketInitialize` 失败重试冷却时间，尝试缓解 0x559 错误（未彻底解决） |
+| **v1.4.1** | **息屏/亮屏自动恢复**：时间跳跃检测息屏、WiFi 重连等待、孤儿 fd 自动清理、代际计数器防 stale fd 崩溃；实测 4 次息屏/亮屏均成功恢复 |
 | **v1.4** | 移除 PSC 电源监控（解决休眠唤醒死机），改用主循环健康检查自动恢复 |
 | **v1.3** | 修复星期读取错误，显式加载时区规则；端口改为 8081 |
 | **v1.2** | 修复 pctl 按需 init/exit，避免与系统家长控制界面冲突 |
