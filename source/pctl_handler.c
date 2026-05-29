@@ -34,6 +34,13 @@
 static Service s_pctlSrv;
 static bool s_initialized = false;
 
+/* Cached timezone rule for reliable day-of-week calculation.
+ * timeToCalendarTimeWithMyRule() often fails in sysmodule context
+ * because the time service doesn't auto-load the timezone rule.
+ * We load it explicitly once at startup and cache it here. */
+static TimeZoneRule s_tz_rule;
+static bool s_tz_rule_loaded = false;
+
 /* ------------------------------------------------------------------ */
 /* pctl_init: Use libnx pctlInitialize() for proper service setup      */
 /* ------------------------------------------------------------------ */
@@ -73,6 +80,37 @@ void pctl_exit(void)
 bool pctl_is_initialized(void)
 {
     return s_initialized;
+}
+
+/* ------------------------------------------------------------------ */
+/* Timezone loading for correct day-of-week in sysmodule context       */
+/* ------------------------------------------------------------------ */
+
+Result pctl_load_timezone(void)
+{
+    Result rc;
+    char tz_name[0x24] = {0};
+
+    /* Get the device timezone location name from settings */
+    rc = setsysInitialize();
+    if (R_FAILED(rc)) {
+        /* Can't get timezone name, day-of-week may be wrong */
+        return rc;
+    }
+    rc = setsysGetDeviceTimeZoneLocationName(tz_name, sizeof(tz_name));
+    setsysExit();
+
+    if (R_FAILED(rc) || tz_name[0] == '\0') {
+        return rc;
+    }
+
+    /* Load the timezone rule from the time service */
+    rc = timeLoadTimeZoneRule((LocationName *)tz_name, &s_tz_rule);
+    if (R_SUCCEEDED(rc)) {
+        s_tz_rule_loaded = true;
+    }
+
+    return rc;
 }
 
 /* ------------------------------------------------------------------ */
@@ -283,41 +321,70 @@ Result pctl_set_daily_limit_minutes(u32 minutes)
 /**
  * Get today's day-of-week in Switch convention: 0=Sun, 1=Mon, ..., 6=Sat.
  *
- * Uses timeToCalendarTimeWithMyRule() which converts UTC timestamp to
- * local calendar time using the system's timezone rule via the Switch
- * time:u service. This is the ONLY reliable way to get the correct
- * day-of-week in sysmodule context, because:
- *   - time(NULL) may return epoch 0 without timeInitialize()
- *   - localtime() has no timezone info in sysmodule context
- *   - gmtime() gives UTC day (wrong for UTC+ users)
- *
- * Falls back to C localtime(), then returns 0 (Sun).
+ * Uses multiple approaches in order of reliability:
+ * 1. timeGetCurrentTime() + timeToCalendarTimeWithMyRule() (auto timezone)
+ * 2. timeGetCurrentTime() + timeToCalendarTime() with explicitly loaded rule
+ * 3. timeGetCurrentTime() + gmtime() (UTC, may be off by 1 day for UTC+ users)
+ * 4. C time()/localtime() (may fail in sysmodule)
+ * 5. Returns 0 (Sunday) as last resort
  */
 int pctl_get_today_day(void)
 {
-    /* Primary: Switch native time service with timezone conversion.
-     * timeToCalendarTimeWithMyRule() handles timezone internally,
-     * returning the correct local calendar time including wday. */
     u64 now_posix = 0;
-    Result rc = timeGetCurrentTime(TimeType_UserSystemClock, &now_posix);
+    Result rc;
+
+    /* Try all clock sources - Network > Local > User */
+    rc = timeGetCurrentTime(TimeType_NetworkSystemClock, &now_posix);
+    if (R_FAILED(rc) || now_posix <= 946684800ULL) {
+        rc = timeGetCurrentTime(TimeType_LocalSystemClock, &now_posix);
+    }
+    if (R_FAILED(rc) || now_posix <= 946684800ULL) {
+        rc = timeGetCurrentTime(TimeType_UserSystemClock, &now_posix);
+    }
+
     if (R_SUCCEEDED(rc) && now_posix > 946684800ULL) {
         TimeCalendarTime cal;
         TimeCalendarAdditionalInfo additional;
+
+        /* Method 1: WithMyRule (auto timezone) */
         rc = timeToCalendarTimeWithMyRule(now_posix, &cal, &additional);
         if (R_SUCCEEDED(rc)) {
-            return (int)additional.wday;  /* 0=Sun..6=Sat */
+            return (int)additional.wday;
+        }
+
+        /* Method 2: Explicitly loaded timezone rule (most reliable in sysmodule) */
+        if (s_tz_rule_loaded) {
+            rc = timeToCalendarTime(now_posix, &s_tz_rule, &cal, &additional);
+            if (R_SUCCEEDED(rc)) {
+                return (int)additional.wday;
+            }
+        }
+
+        /* Method 3: gmtime() gives UTC day — off by 1 for UTC+ users
+         * but still better than returning wrong day consistently.
+         * We add a simple heuristic: if it's between 0:00-8:00 UTC
+         * and we're likely in a UTC+ timezone, the local day might
+         * be the next one. But without knowing the offset, we can't
+         * be sure. Just return UTC day and hope for the best. */
+        {
+            time_t t = (time_t)now_posix;
+            struct tm *tm_info = gmtime(&t);
+            if (tm_info)
+                return tm_info->tm_wday;
         }
     }
 
-    /* Fallback: C standard library (may have wrong timezone in sysmodule) */
-    time_t t = time(NULL);
-    if (t != (time_t)-1 && t > 946684800ULL) {
-        struct tm *tm_info = localtime(&t);
-        if (tm_info)
-            return tm_info->tm_wday;
+    /* Method 4: C standard library (may return epoch 0 in sysmodule) */
+    {
+        time_t t = time(NULL);
+        if (t != (time_t)-1 && t > 946684800ULL) {
+            struct tm *tm_info = localtime(&t);
+            if (tm_info)
+                return tm_info->tm_wday;
+        }
     }
 
-    /* Last resort */
+    /* Last resort: return Sunday */
     return 0;
 }
 

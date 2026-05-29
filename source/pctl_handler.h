@@ -107,4 +107,12 @@ Result pctl_get_daily_limit_minutes(u32 *minutes);
 /** Reset current day's play time (stop + re-apply settings + start). */
 Result pctl_reset_play_time(void);
 
+/**
+ * Load the system timezone rule for correct day-of-week calculation.
+ * MUST be called once after timeInitialize() during startup.
+ * This is needed because timeToCalendarTimeWithMyRule() may fail
+ * in sysmodule context where the timezone rule isn't auto-loaded.
+ */
+Result pctl_load_timezone(void);
+
 #endif /* PCTL_HANDLER_H */

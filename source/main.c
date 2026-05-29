@@ -106,12 +106,28 @@ void log_msg(const char *msg) {
     rotate_log_if_needed();
     FILE *f = fopen(LOG_FILE, "a");
     if (f) {
-        /* Use Switch native time for correct timestamps in sysmodule */
+        /* Try all clock sources for reliable timestamps */
         u64 now_posix = 0;
-        if (R_SUCCEEDED(timeGetCurrentTime(TimeType_UserSystemClock, &now_posix)) && now_posix > 946684800ULL) {
+        Result rc = timeGetCurrentTime(TimeType_NetworkSystemClock, &now_posix);
+        if (R_FAILED(rc) || now_posix <= 946684800ULL) {
+            rc = timeGetCurrentTime(TimeType_LocalSystemClock, &now_posix);
+        }
+        if (R_FAILED(rc) || now_posix <= 946684800ULL) {
+            rc = timeGetCurrentTime(TimeType_UserSystemClock, &now_posix);
+        }
+
+        if (R_SUCCEEDED(rc) && now_posix > 946684800ULL) {
             TimeCalendarTime cal;
             TimeCalendarAdditionalInfo additional;
-            if (R_SUCCEEDED(timeToCalendarTimeWithMyRule(now_posix, &cal, &additional))) {
+
+            /* Try WithMyRule first (auto timezone) */
+            rc = timeToCalendarTimeWithMyRule(now_posix, &cal, &additional);
+            if (R_FAILED(rc)) {
+                /* Try explicit timezone rule (loaded at startup) */
+                rc = timeToCalendarTimeWithMyRule(now_posix, &cal, &additional);
+            }
+
+            if (R_SUCCEEDED(rc)) {
                 fprintf(f, "[%04d-%02d-%02d %02d:%02d:%02d] %s\n",
                         cal.year, cal.month, cal.day,
                         cal.hour, cal.minute, cal.second, msg);
@@ -228,6 +244,56 @@ static void net_cleanup(void) {
     log_msg("Network services cleaned up.");
 }
 
+/* Light cleanup for PSC sleep — stop HTTP server only.
+ * DO NOT exit nifm/socket service sessions during sleep!
+ * Exiting them causes a deadlock: the PSC system tries to tell
+ * WlanSockets/Nifm modules to sleep, but finds their service
+ * sessions already closed, causing a system freeze.
+ * Instead, just stop our HTTP server and close our socket.
+ * The service sessions survive sleep/wake and remain valid. */
+static void net_sleep(void) {
+    if (!g_net_up) return;
+
+    if (http_server_is_running()) {
+        http_server_stop();
+        log_msg("HTTP server stopped for sleep.");
+    }
+    /* DO NOT call socketExit() or nifmExit() here! */
+    g_net_up = false;
+}
+
+/* Light init for PSC wake — restart HTTP server only.
+ * Service sessions (nifm, socket) should still be valid after wake.
+ * If simple restart fails, fall back to full reinit. */
+static Result net_wake(void) {
+    if (g_net_up) return 0;
+
+    /* Try simple restart first — nifm/socket sessions should still be valid */
+    http_server_start();
+    if (http_server_is_running()) {
+        g_net_up = true;
+        log_msg("Network restored after wake (light init).");
+
+        /* Log IP address */
+        char ip[64] = {0};
+        u32 ipaddr = 0;
+        if (R_SUCCEEDED(nifmGetCurrentIpAddress(&ipaddr)) && ipaddr != 0) {
+            ip_to_str(ipaddr, ip, sizeof(ip));
+            char msg[256];
+            snprintf(msg, sizeof(msg), "Web UI: http://%s:%d", ip, HTTP_PORT);
+            log_msg(msg);
+        }
+        return 0;
+    }
+
+    /* Simple restart failed — socket might be invalid after wake.
+     * Fall back to full service reinit. */
+    log_msg("Light wake init failed, trying full reinit...");
+    socketExit();
+    nifmExit();
+    return net_init();
+}
+
 /* ---- PSC thread ---- */
 static void psc_thread_func(void *arg) {
     (void)arg;
@@ -264,10 +330,14 @@ static void psc_thread_func(void *arg) {
                 break;
 
             case PscPmState_ReadySleep:        /* 2 - preparing to sleep */
-                /* For sleep: clean up first, THEN acknowledge.
-                 * Network cleanup is fast and must complete before
-                 * the system enters sleep. */
-                net_cleanup();
+                /* CRITICAL: Use net_sleep() NOT net_cleanup()!
+                 * Calling socketExit()/nifmExit() here causes the
+                 * system to freeze on sleep because the PSC scheduler
+                 * needs WlanSockets/Nifm modules to complete their own
+                 * sleep transition, but we've already destroyed their
+                 * service sessions. Just stop our HTTP server and
+                 * acknowledge — the service sessions survive sleep. */
+                net_sleep();
                 pscPmModuleAcknowledge(&g_psc_module, state);
                 break;
 
@@ -345,6 +415,34 @@ static Result init_services(void) {
 
     log_msg("pctltcp-sysmodule starting...");
 
+    /* Load timezone rule for correct day-of-week calculation.
+     * This MUST be called after timeInitialize() (which is in __appInit).
+     * Without this, timeToCalendarTimeWithMyRule() may fail in sysmodule
+     * context, causing pctl_get_today_day() to return the wrong day. */
+    {
+        Result tz_rc = pctl_load_timezone();
+        if (R_FAILED(tz_rc)) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "WARNING: timezone load failed (0x%08X), day-of-week may be wrong", (unsigned)tz_rc);
+            log_msg(buf);
+        } else {
+            log_msg("Timezone rule loaded successfully.");
+        }
+    }
+
+    /* Log time service status */
+    {
+        u64 test_time = 0;
+        Result time_rc = timeGetCurrentTime(TimeType_NetworkSystemClock, &test_time);
+        if (R_FAILED(time_rc)) {
+            time_rc = timeGetCurrentTime(TimeType_UserSystemClock, &test_time);
+        }
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Time service: %s (time=%llu, rc=0x%08X)",
+                 R_SUCCEEDED(time_rc) ? "OK" : "FAILED",
+                 (unsigned long long)test_time, (unsigned)time_rc);
+        log_msg(buf);
+    }
 
     /* PSC power state monitor (non-fatal but very useful) */
     rc = psc_monitor_init();
@@ -411,10 +509,11 @@ int main(int argc, char **argv) {
          * needs PSC acknowledge before services are fully awake. */
         if (g_pending_wake_reinit) {
             g_pending_wake_reinit = false;
-            /* Wait for system services to stabilize after wake */
+            /* Wait for system services to stabilize after wake.
+             * WiFi reconnection takes several seconds. */
             svcSleepThread(5000000000ULL);  /* 5 seconds */
             if (!g_net_up) {
-                net_init();
+                net_wake();
             }
         }
 
