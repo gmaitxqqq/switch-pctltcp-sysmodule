@@ -3,11 +3,8 @@ name: Build switch-pctltcp-sysmodule
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  actions: write
+  pull_request:
+    branches: [ main ]
 
 jobs:
   build:
@@ -16,46 +13,47 @@ jobs:
       image: devkitpro/devkita64:latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Checkout repo
+      uses: actions/checkout@v4
 
-      - name: Build ELF
-        run: |
-          make clean
-          make -j$(nproc)
+    - name: Install switch-tools
+      run: |
+        dkp-pacman -S --noconfirm switch-tools 2>/dev/null || true
+        # Verify tools are available
+        which npdmtool 2>/dev/null && echo "npdmtool: OK" || echo "npdmtool: NOT FOUND"
+        which elf2nso 2>/dev/null && echo "elf2nso: OK" || echo "elf2nso: NOT FOUND"
 
-      - name: Generate NPDM and package NSP
-        run: |
-          # Generate NPDM from JSON config
-          python3 tools/mknpdm.py pctltcp-sysmodule.npdm.json main.npdm
+    - name: Build
+      run: |
+        make clean || true
+        make
 
-          # Package ELF + NPDM as NSP (PFS0 container)
-          python3 tools/mknsp.py exefs.nsp pctltcp-sysmodule.elf main.npdm
+    - name: Prepare release artifact
+      run: |
+        TID="010000000000BD23"
+        DIST="dist/atmosphere/contents/${TID}"
+        FLAGS="dist/atmosphere/contents/${TID}/flags"
 
-          echo "=== Build artifacts ==="
-          ls -la pctltcp-sysmodule.elf main.npdm exefs.nsp
+        mkdir -p "${DIST}" "${FLAGS}"
 
-      - name: Package sysmodule
-        run: |
-          TID="0100000000000023"
-          mkdir -p release/atmosphere/contents/${TID}
-          mkdir -p release/atmosphere/contents/${TID}/flags
+        # Copy the NSP built by switch_rules (contains NSO + NPDM)
+        if [ -f "pctltcp-sysmodule.nsp" ]; then
+          cp "pctltcp-sysmodule.nsp" "${DIST}/exefs.nsp"
+          echo "NSP from switch_rules (NSO+NPDM): OK"
+        else
+          echo "ERROR: pctltcp-sysmodule.nsp not found!"
+          ls -la *.nsp *.nso *.npdm *.elf 2>/dev/null || true
+          exit 1
+        fi
 
-          # Copy NSP as exefs.nsp (contains main ELF + main.npdm)
-          cp exefs.nsp release/atmosphere/contents/${TID}/exefs.nsp
+        # Create boot2 flag for auto-start
+        touch "${FLAGS}/boot2.flag"
 
-          # Create boot2 flag for auto-start
-          touch release/atmosphere/contents/${TID}/flags/boot2.flag
+        echo "--- Release contents ---"
+        find dist/ -type f
 
-          # Copy toolbox.json for Homebrew Toolbox
-          cp toolbox.json release/atmosphere/contents/${TID}/toolbox.json
-
-          echo "=== Output ==="
-          ls -laR release/
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: pctltcp-sysmodule
-          path: release/
-          if-no-files-found: error
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: pctltcp-sysmodule
+        path: dist/

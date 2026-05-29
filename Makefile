@@ -1,7 +1,7 @@
 #---------------------------------------------------------------------------------
 # Makefile for switch-pctltcp-sysmodule
-# Based on the working switch-pctltcp-web Makefile
-# Output: .elf (converted to .nsp by CI via elf2nsp.py)
+# Uses switch_rules with APP_JSON to build proper NSP (NSO + NPDM)
+# Based on sys-con's approach (github.com/o0Zz/sys-con)
 #---------------------------------------------------------------------------------
 
 ifeq ($(strip $(DEVKITPRO)),)
@@ -71,6 +71,12 @@ export INCLUDE	:=	$(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 
 export LIBPATHS	:=	$(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
+#---------------------------------------------------------------------------------
+# APP_JSON — when set, switch_rules builds .nsp instead of .nro
+# The .json file must be named $(TARGET).json or set via CONFIG_JSON
+#---------------------------------------------------------------------------------
+export APP_JSON := $(TOPDIR)/$(TARGET).json
+
 .PHONY: $(BUILD) clean all
 
 all: $(BUILD)
@@ -81,7 +87,7 @@ $(BUILD):
 
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).nro $(TARGET).nsp
+	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).nso $(TARGET).npdm $(TARGET).nsp
 
 #---------------------------------------------------------------------------------
 else
@@ -90,9 +96,14 @@ else
 DEPENDS	:=	$(OFILES:.o=.d)
 
 #---------------------------------------------------------------------------------
-# Build .elf only — .nsp conversion is done by elf2nsp.py in CI
+# When APP_JSON is set, switch_rules builds .nsp (not .nro)
+# .nsp contains: main (NSO) + main.npdm (NPDM from JSON)
 #---------------------------------------------------------------------------------
-all	:	$(OUTPUT).elf
+all	:	$(OUTPUT).nsp
+
+$(OUTPUT).nsp	:	$(OUTPUT).nso $(OUTPUT).npdm
+
+$(OUTPUT).nso	:	$(OUTPUT).elf
 
 $(OUTPUT).elf	:	$(OFILES)
 

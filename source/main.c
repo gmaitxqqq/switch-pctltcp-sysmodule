@@ -1,7 +1,6 @@
 // pctltcp-sysmodule - Switch Parental Control Web Server (boot2 sysmodule)
-// Build: make -> pctltcp-sysmodule.elf
-// CI: mknpdm.py + mknsp.py -> exefs.nsp
-// Install: sd:/atmosphere/contents/0100000000000023/exefs.nsp + flags/boot2.flag
+// Build: make -> pctltcp-sysmodule.nsp (with APP_JSON)
+// Install: sd:/atmosphere/contents/010000000000BD23/exefs.nsp + flags/boot2.flag
 
 #include <switch.h>
 #include <stdio.h>
@@ -17,33 +16,84 @@
 /* ================================================================
  * Sysmodule CRT0 overrides — CRITICAL for boot survival
  *
- * Problem: switch.specs CRT0 calls __appInit() before main().
- * The default __appInit() checks __nx_applet_type; if it's
- * not AppletType_None, it tries appletInitialize() which
- * DOES NOT EXIST in sysmodule context → fatalSimple() → crash.
+ * Based on working sys-con sysmodule (github.com/o0Zz/sys-con)
+ * which uses plain libnx (not Stratosphere) and works as boot2.
  *
- * Fix: Set __nx_applet_type = 0 and override __appInit/__appExit.
- * This tells the CRT0 "I'm not an applet, skip that stuff".
+ * Three things are REQUIRED for a libnx sysmodule:
+ * 1. __nx_applet_type = AppletType_None
+ * 2. __libnx_initheap with custom inner heap
+ * 3. __appInit that initializes ALL services + sets hosversion
  * ================================================================ */
-u32 __nx_applet_type = 0;           /* AppletType_None — MUST be 0 for sysmodule */
-u32 __nx_fs_num_sessions = 1;       /* Reduce FS session count for sysmodule */
 
-/* Override __appInit: only initialize SM (service manager).
- * All other services (fs, pctl, nifm, socket, etc.) are
- * initialized in main() -> init_base_services() / net_init(). */
+#define INNER_HEAP_SIZE 0x80000  /* 512 KiB — same as sys-con */
+
+/* ---- CRT0 global overrides ---- */
+u32 __nx_applet_type = AppletType_None;  /* 0 — no applet */
+u32 __nx_fs_num_sessions = 1;            /* reduce FS sessions for sysmodule */
+
+/* ---- Custom heap ---- */
+void __libnx_initheap(void) {
+    static u8 inner_heap[INNER_HEAP_SIZE];
+    extern void *fake_heap_start;
+    extern void *fake_heap_end;
+
+    fake_heap_start = inner_heap;
+    fake_heap_end   = inner_heap + sizeof(inner_heap);
+}
+
+/* ---- __appInit — follow sys-con pattern exactly ----
+ *
+ * CRITICAL: Initialize ALL services here, not in main().
+ * The CRT0 expects __appInit to set up everything.
+ * Key steps:
+ * 1. smInitialize() first (needed for all other services)
+ * 2. setsysInitialize() → get firmware version → hosversionSet()
+ *    (libnx functions depend on hosversion being set correctly)
+ * 3. Initialize all needed services
+ * 4. smExit() BEFORE fsdevMountSdmc() (release SM session)
+ * 5. fsdevMountSdmc() last
+ */
 Result __appInit(void) {
-    Result rc = smInitialize();
+    Result rc;
+
+    rc = smInitialize();
     if (R_FAILED(rc)) return rc;
+
+    /* Get firmware version — REQUIRED for libnx version-aware functions */
+    rc = setsysInitialize();
+    if (R_SUCCEEDED(rc)) {
+        SetSysFirmwareVersion fw;
+        rc = setsysGetFirmwareVersion(&fw);
+        if (R_SUCCEEDED(rc)) {
+            hosversionSet(MAKEHOSVERSION(fw.major, fw.minor, fw.micro));
+        }
+        setsysExit();
+    }
+
+    rc = pscmInitialize();
+    if (R_FAILED(rc)) return rc;
+
+    rc = fsInitialize();
+    if (R_FAILED(rc)) return rc;
+
+    /* Release SM session — fsdevMountSdmc re-connects internally */
+    smExit();
+
+    rc = fsdevMountSdmc();
+    if (R_FAILED(rc)) return rc;
+
     return 0;
 }
 
-/* Override __appExit: only clean up SM.
- * All other services are cleaned up in exit_all_services(). */
+/* ---- __appExit ---- */
 void __appExit(void) {
-    smExit();
+    fsdevUnmountAll();
+    fsExit();
+    pscmExit();
 }
 
-#define PROGRAM_ID  0x0100000000000023ULL
+/* ---- Constants ---- */
+#define PROGRAM_ID  0x010000000000BD23ULL
 #define LOG_FILE    "sdmc:/switch/pctltcp-sysmodule/sysmodule.log"
 #define MAX_LOG_SIZE (100 * 1024)
 
@@ -103,18 +153,6 @@ static void ip_to_str(u32 ip, char *buf, size_t bufsize) {
  *   - Re-initialize sockets
  *   - Re-start the HTTP server
  *   - Log the new IP address
- *
- * Based on libnx psc.h API (actual function signatures):
- *   pscmGetPmModule(out, module_id, deps, dep_count, autoclear)
- *   pscPmModuleGetRequest(module, &state, &flags)
- *   pscPmModuleAcknowledge(module, state)
- *   pscPmModuleFinalize(module)
- *
- * PscPmState enum:
- *   PscPmState_Awake = 0
- *   PscPmState_ReadyAwaken = 1
- *   PscPmState_ReadySleep = 2
- *   PscPmState_ReadyShutdown = 5
  * ================================================================ */
 
 static PscPmModule g_psc_module;
@@ -240,14 +278,14 @@ static void psc_thread_func(void *arg) {
 static Result psc_monitor_init(void) {
     Result rc;
 
-    rc = pscmInitialize();
-    if (R_FAILED(rc)) {
-        log_result("pscmInitialize", rc);
-        return rc;
-    }
+    /* pscmInitialize is already called in __appInit, but we need to
+     * re-initialize since __appExit's pscmExit() will clean it up.
+     * Actually, __appExit only runs on process exit, so it's fine
+     * to use the session from __appInit. But pscmInitialize is
+     * idempotent, so calling it again is safe. */
 
     /* GetPmModule combines registration + initialization.
-     * Module ID: 0x7E (custom homebrew ID, same as sys-con)
+     * Module ID: 0x7E (custom homebrew ID)
      * Dependencies: WlanSockets (25) + Nifm (38) — we need network
      *               to come up before us on wake.
      * autoclear: true (event auto-resets after wait) */
@@ -256,7 +294,6 @@ static Result psc_monitor_init(void) {
                           deps, sizeof(deps) / sizeof(u32), true);
     if (R_FAILED(rc)) {
         log_result("pscmGetPmModule", rc);
-        pscmExit();
         return rc;
     }
 
@@ -267,7 +304,6 @@ static Result psc_monitor_init(void) {
     if (R_FAILED(rc)) {
         log_result("threadCreate(psc)", rc);
         pscPmModuleClose(&g_psc_module);
-        pscmExit();
         return rc;
     }
 
@@ -276,7 +312,6 @@ static Result psc_monitor_init(void) {
         log_result("threadStart(psc)", rc);
         threadClose(&g_psc_thread);
         pscPmModuleClose(&g_psc_module);
-        pscmExit();
         return rc;
     }
 
@@ -294,40 +329,32 @@ static void psc_monitor_exit(void) {
     threadWaitForExit(&g_psc_thread);
     threadClose(&g_psc_thread);
     pscPmModuleClose(&g_psc_module);
-    pscmExit();
     log_msg("PSC power monitor stopped.");
 }
 
 /* ================================================================
  * Main service init — called once at startup
+ *
+ * Note: smInitialize/setsys/fsInitialize/pscmInitialize/fsdevMountSdmc
+ * are already done in __appInit. Here we initialize application-specific
+ * services (pctl, PSC module, network).
  * ================================================================ */
 static bool s_base_ready = false;
 
-static Result init_base_services(void) {
+static Result init_services(void) {
     Result rc;
 
-    /* Step 1: FS + mount SD card (for logging)
-     * Note: smInitialize() is already called by __appInit() */
-    rc = fsInitialize();
-    if (R_SUCCEEDED(rc)) {
-        rc = fsdevMountSdmc();
-        if (R_SUCCEEDED(rc)) {
-            mkdir("sdmc:/switch", 0777);
-            mkdir("sdmc:/switch/pctltcp-sysmodule", 0777);
-        }
-    }
+    /* Create log directory */
+    mkdir("sdmc:/switch", 0777);
+    mkdir("sdmc:/switch/pctltcp-sysmodule", 0777);
 
     log_msg("pctltcp-sysmodule starting...");
 
-    /* Step 2: System settings (non-fatal) */
-    rc = setsysInitialize();
-    log_result("setsysInitialize", rc);
-
-    /* Step 3: Parental control service */
+    /* Parental control service */
     rc = pctl_init();
     log_result("pctl_init", rc);
 
-    /* Step 4: PSC power state monitor (non-fatal but very useful) */
+    /* PSC power state monitor (non-fatal but very useful) */
     rc = psc_monitor_init();
     log_result("psc_monitor_init", rc);
 
@@ -335,14 +362,11 @@ static Result init_base_services(void) {
     return 0;
 }
 
-static void exit_all_services(void) {
+static void exit_services(void) {
     net_cleanup();
     psc_monitor_exit();
     if (pctl_is_initialized()) pctl_exit();
-    setsysExit();
-    fsdevUnmountDevice("sdmc");
-    fsExit();
-    /* Note: smExit() is called by __appExit(), not here */
+    log_msg("pctltcp-sysmodule exiting.");
 }
 
 /* ================================================================
@@ -355,13 +379,14 @@ int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    /* Wait for system to be ready before initializing services */
+    /* Wait for system to be ready before initializing services.
+     * At boot2, some services might not be fully up yet. */
     svcSleepThread(5000000000ULL);  /* 5 seconds */
 
-    /* Initialize base services (sm, fs, setsys, pctl, psc) */
-    Result rc = init_base_services();
+    /* Initialize services (pctl, PSC monitor) */
+    Result rc = init_services();
     if (R_FAILED(rc)) {
-        log_msg("FATAL: Base services failed to initialize");
+        log_msg("FATAL: Service initialization failed");
     }
 
     /* Initialize network (socket, nifm, HTTP server) with retry */
@@ -441,6 +466,6 @@ int main(int argc, char **argv) {
     }
 
     /* Unreachable */
-    exit_all_services();
+    exit_services();
     return 0;
 }
