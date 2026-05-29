@@ -333,16 +333,18 @@ void http_server_start(void)
 void http_server_stop(void)
 {
     /*
-     * On Switch, after sleep/wake, the old socket fd is stale.
-     * We MUST NOT close() it — on Nintendo Switch, closing a stale
-     * fd that the kernel already disposed of can trigger a memory
-     * access violation (error 2168-0002). Instead, just wait for
-     * the thread to exit (it will detect the error via select()),
-     * then let the kernel reclaim the fd. http_server_start() will
-     * overwrite s_server_fd with a fresh socket.
+     * After pthread_join, the thread is completely done — no one
+     * is using the socket fd. So close() is safe here.
+     * (The crash was from calling shutdown()/close() BEFORE join,
+     *  while the thread was still in select()/accept().)
      */
     s_running = false;
     pthread_join(s_thread, NULL);
+
+    if (s_server_fd >= 0) {
+        close(s_server_fd);
+        s_server_fd = -1;
+    }
 }
 
 bool http_server_is_running(void)

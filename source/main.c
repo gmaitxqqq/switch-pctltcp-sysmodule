@@ -245,14 +245,41 @@ static void net_cleanup(void) {
 /* ---- HTTP server restart (for sleep/wake recovery) ----
  * Does NOT tear down socket/nifm - in a boot2 sysmodule,
  * once socketExit() is called, we can't re-acquire the
- * bsd service session. So we only restart the HTTP layer. */
+ * bsd service session. So we only restart the HTTP layer.
+ *
+ * CRITICAL: After sleep/wake, WiFi takes 3-10 seconds to
+ * reconnect. If we create a new socket before WiFi is ready,
+ * bind() succeeds but the socket is bound to a dead interface
+ * → "restarted successfully" but actually unreachable. */
 static Result http_restart(void) {
     if (http_server_is_running()) {
         http_server_stop();
         log_msg("HTTP server stopped.");
     }
-    /* Small delay to let system services stabilize */
-    svcSleepThread(2000000000ULL);  /* 2 seconds */
+
+    /* Wait for WiFi to reconnect: poll nifm for valid IP address.
+     * This is the key fix — we must NOT create a socket until the
+     * network interface is actually back up. */
+    log_msg("Waiting for WiFi to reconnect...");
+    int wifi_wait = 0;
+    while (wifi_wait < 30) {  /* up to 30 seconds */
+        u32 ip = 0;
+        Result rc = nifmGetCurrentIpAddress(&ip);
+        if (R_SUCCEEDED(rc) && ip != 0) {
+            char ipstr[64];
+            ip_to_str(ip, ipstr, sizeof(ipstr));
+            char msg[256];
+            snprintf(msg, sizeof(msg), "WiFi back (IP=%s), restarting HTTP server.", ipstr);
+            log_msg(msg);
+            break;
+        }
+        svcSleepThread(1000000000ULL);  /* 1 second */
+        wifi_wait++;
+    }
+    if (wifi_wait >= 30) {
+        log_msg("WiFi not back after 30s, restarting HTTP server anyway.");
+    }
+
     http_server_start();
     if (!http_server_is_running()) {
         log_msg("HTTP server restart FAILED.");
@@ -379,12 +406,12 @@ int main(int argc, char **argv) {
         if (loop > 5 && g_net_up && (t_after - t_before) > 5) {
             char msg[256];
             snprintf(msg, sizeof(msg),
-                     "Sleep/wake detected (%llus jump), will let thread exit naturally...",
+                     "Sleep/wake detected (%llus jump), waiting for WiFi...",
                      (unsigned long long)(t_after - t_before));
             log_msg(msg);
-            /* Don't touch sockets directly — the HTTP thread will detect
-             * stale socket via select() error within 500ms, then the 5-second
-             * health check will trigger http_restart() safely. */
+            http_restart();
+            nifm_fail_count = 0;
+            continue;
         }
 
         /* ---- Health check: HTTP server running? ---- */
