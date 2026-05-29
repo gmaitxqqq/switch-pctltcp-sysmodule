@@ -19,19 +19,10 @@ include $(DEVKITPRO)/libnx/switch_rules
 # INCLUDES is a list of directories containing header files
 #---------------------------------------------------------------------------------
 TARGET		:= pctltcp-sysmodule
-
-# sysmodule: use switch_sysmodule.specs + userAppMain() entry
-# Do NOT set APPLET_TYPE - let the hardcoded LDFLAGS handle the specs file.
-APPLET_TYPE	:=
-NODEFAULTFW	:=
-
 BUILD		:= build
 SOURCES	:= source
 DATA		:= data
 INCLUDES	:= include
-
-# APP_JSON for npdmtool - defines NPDM/permissions
-CONFIG_JSON	:= pctltcp-sysmodule.json
 
 #---------------------------------------------------------------------------------
 # options for code generation
@@ -41,13 +32,12 @@ ARCH		:= -march=armv8-a -mtune=cortex-a57 -mtp=soft -fpie
 CFLAGS		:= -g -Wall -O2 -ffunction-sections \
 		   $(ARCH) $(DEFINES)
 
-CFLAGS		+= $(INCLUDE) -D__SWITCH__ -DVERSION=\"1.0.0\"
+CFLAGS		+= $(INCLUDE) -D__SWITCH__ -DVERSION_S=\"1.0.0\"
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 
 ASFLAGS		:= -g $(ARCH)
 
-# Use switch_sysmodule.specs (verified present in devkitPro Docker image)
 LDFLAGS	= -specs=$(DEVKITPRO)/libnx/switch_sysmodule.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
 LIBS		:= -lnx
@@ -56,7 +46,7 @@ LIBS		:= -lnx
 # list of directories containing libraries, this must be the top level containing
 # include and lib
 #---------------------------------------------------------------------------------
-LIBDIRS		:= $(PORTLIBS) $(LIBNX)
+LIBDIRS	:= $(PORTLIBS) $(LIBNX)
 
 #---------------------------------------------------------------------------------
 # no real need to edit anything past this point unless you need to add additional
@@ -71,7 +61,7 @@ export TOPDIR	:= $(CURDIR)
 export VPATH	:= $(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) \
 		   $(foreach dir,$(DATA),$(CURDIR)/$(dir))
 
-export DEPSSDIR	:= $(CURDIR)/$(BUILD)
+export DEPSDIR	:= $(CURDIR)/$(BUILD)
 
 CFILES		:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
 CPPFILES	:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
@@ -98,19 +88,6 @@ export INCLUDE	:= $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 
 export LIBPATHS	:= $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
-ifeq ($(strip $(CONFIG_JSON)),)
-	jsons := $(wildcard *.json)
-	ifneq (,$(findstring $(TARGET).json,$(jsons)))
-		export APP_JSON := $(TOPDIR)/$(TARGET).json
-	else
-		ifneq (,$(findstring config.json,$(jsons)))
-			export APP_JSON := $(TOPDIR)/config.json
-		endif
-	endif
-else
-	export APP_JSON := $(TOPDIR)/$(CONFIG_JSON)
-endif
-
 .PHONY: $(BUILD) clean all
 
 all: $(BUILD)
@@ -121,22 +98,22 @@ $(BUILD):
 
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).nsp $(TARGET).sts
+	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).nro $(TARGET).sts
 
 #---------------------------------------------------------------------------------
 else
 .PHONY:	all
 
-DEPS		:= $(OBJFILES:.o=.d)
+DEPENDS	:= $(OBJFILES:.o=.d)
 
 #---------------------------------------------------------------------------------
-# main targets - build .sts for sysmodule
+# main targets — build .sts (sysmodule) instead of .nro
 #---------------------------------------------------------------------------------
 all	:	$(OUTPUT).sts
 
-# .sts target: ELF -> STS (for atmosphere/sysmodules/)
+# Sysmodule target (self-contained executable)
 $(OUTPUT).sts	:	$(OUTPUT).elf
-	@echo building ... $(notdir $@)
+	@echo built ... $(notdir $@)
 	@$(NOFDEFAULTS) $< $@
 
 $(OUTPUT).elf	:	$(OBJFILES)
@@ -147,7 +124,7 @@ $(OBJFILES_SRC)	: $(HFILES_BIN)
 	@echo $(notdir $<)
 	@$(bin2o)
 
--include $(DEPS)
+-include $(DEPENDS)
 
 #---------------------------------------------------------------------------------------
 endif
