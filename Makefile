@@ -19,7 +19,7 @@ CXX         := $(DEVKITA64)/bin/aarch64-none-elf-g++
 AS          := $(DEVKITA64)/bin/aarch64-none-elf-as
 LD          := $(DEVKITA64)/bin/aarch64-none-elf-gcc
 OBJCOPY     := $(DEVKITA64)/bin/aarch64-none-elf-objcopy
-NOFDEFAULTS := $(TOOLS)/bin/nofdefaultS
+NOFDEFAULTS := elf2nsp
 
 # ---- Flags ----
 ARCH    := -march=armv8-a -mtune=cortex-a57 -mtp=soft -fpie

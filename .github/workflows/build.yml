@@ -19,6 +19,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install switch-tools (provides elf2nsp)
+        run: |
+          pacman -Suy --noconfirm
+          pacman -S --noconfirm switch-tools
+
       - name: Build
         run: |
           make clean
