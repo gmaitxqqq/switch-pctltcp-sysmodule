@@ -27,6 +27,7 @@
 static int       s_server_fd = -1;
 static bool      s_running   = false;
 static pthread_t s_thread;
+static volatile int s_generation = 0;  /* bumped on each restart */
 
 /* ------------------------------------------------------------------ */
 /* HTTP helpers                                                        */
@@ -250,8 +251,12 @@ static void handle_request(int fd)
 static void *http_thread_func(void *arg)
 {
     (void)arg;
+    int gen = s_generation;  /* snapshot at thread start */
 
     while (s_running) {
+        /* If http_restart() happened, our socket is stale — exit immediately */
+        if (s_generation != gen) break;
+
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(s_server_fd, &rfds);
@@ -260,21 +265,18 @@ static void *http_thread_func(void *arg)
         tv.tv_usec = 500000;
 
         int ret = select(s_server_fd + 1, &rfds, NULL, NULL, &tv);
-        if (ret < 0) {
-            /* Socket error — likely broken after system sleep/wake.
-             * The WlanSockets module reinitializes on wake and invalidates
-             * old sockets. Exit the thread so the main loop can detect
-             * the failure and do a full network reinit. */
+        if (ret < 0 || s_generation != gen) {
             s_running = false;
             break;
         }
-        if (ret == 0) continue;  /* Timeout, no incoming connection */
+        if (ret == 0) continue;
 
         if (FD_ISSET(s_server_fd, &rfds)) {
+            /* Double-check: don't accept if we've been restarted */
+            if (s_generation != gen) break;
             int client_fd = accept(s_server_fd, NULL, NULL);
-            if (client_fd < 0) {
-                /* Accept error — socket might be broken after sleep/wake.
-                 * Same as select error: exit and let main loop reinit. */
+            if (client_fd < 0 || s_generation != gen) {
+                if (client_fd >= 0) close(client_fd);
                 s_running = false;
                 break;
             }
@@ -317,6 +319,7 @@ void http_server_start(void)
     }
 
     s_running = true;
+    s_generation++;  /* bump so old threads know to exit */
 
     /* Use explicit stack size for the HTTP server thread.
      * Default pthread stack on Switch/newlib is often too small. */
@@ -330,23 +333,16 @@ void http_server_start(void)
 void http_server_stop(void)
 {
     /*
-     * CRITICAL: Do NOT touch the socket before the thread has exited.
-     * After sleep/wake, the socket fd may be valid but the underlying
-     * kernel socket is already destroyed by WlanSockets.
-     * Calling shutdown()/close() on a stale fd causes system crash.
-     *
-     * Strategy:
-     * 1. Set s_running = false (thread checks this every 500ms timeout)
-     * 2. Wait for thread to exit via pthread_join (max 500ms)
-     * 3. Only then safely close the socket fd
+     * On Switch, after sleep/wake, the old socket fd is stale.
+     * We MUST NOT close() it — on Nintendo Switch, closing a stale
+     * fd that the kernel already disposed of can trigger a memory
+     * access violation (error 2168-0002). Instead, just wait for
+     * the thread to exit (it will detect the error via select()),
+     * then let the kernel reclaim the fd. http_server_start() will
+     * overwrite s_server_fd with a fresh socket.
      */
     s_running = false;
     pthread_join(s_thread, NULL);
-
-    if (s_server_fd >= 0) {
-        close(s_server_fd);
-        s_server_fd = -1;
-    }
 }
 
 bool http_server_is_running(void)

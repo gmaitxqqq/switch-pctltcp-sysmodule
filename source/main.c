@@ -379,12 +379,12 @@ int main(int argc, char **argv) {
         if (loop > 5 && g_net_up && (t_after - t_before) > 5) {
             char msg[256];
             snprintf(msg, sizeof(msg),
-                     "Sleep/wake detected (%llus jump), reinitializing...",
+                     "Sleep/wake detected (%llus jump), will let thread exit naturally...",
                      (unsigned long long)(t_after - t_before));
             log_msg(msg);
-            http_restart();
-            nifm_fail_count = 0;
-            continue;
+            /* Don't touch sockets directly — the HTTP thread will detect
+             * stale socket via select() error within 500ms, then the 5-second
+             * health check will trigger http_restart() safely. */
         }
 
         /* ---- Health check: HTTP server running? ---- */
