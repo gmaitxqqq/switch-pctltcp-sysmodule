@@ -329,15 +329,24 @@ void http_server_start(void)
 
 void http_server_stop(void)
 {
+    /*
+     * CRITICAL: Do NOT touch the socket before the thread has exited.
+     * After sleep/wake, the socket fd may be valid but the underlying
+     * kernel socket is already destroyed by WlanSockets.
+     * Calling shutdown()/close() on a stale fd causes system crash.
+     *
+     * Strategy:
+     * 1. Set s_running = false (thread checks this every 500ms timeout)
+     * 2. Wait for thread to exit via pthread_join (max 500ms)
+     * 3. Only then safely close the socket fd
+     */
     s_running = false;
+    pthread_join(s_thread, NULL);
 
     if (s_server_fd >= 0) {
-        shutdown(s_server_fd, SHUT_RDWR);
         close(s_server_fd);
         s_server_fd = -1;
     }
-
-    pthread_join(s_thread, NULL);
 }
 
 bool http_server_is_running(void)
