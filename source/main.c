@@ -252,14 +252,16 @@ static void net_cleanup(void) {
  * bind() succeeds but the socket is bound to a dead interface
  * → "restarted successfully" but actually unreachable. */
 static Result http_restart(void) {
-    if (http_server_is_running()) {
-        http_server_stop();
-        log_msg("HTTP server stopped.");
-    }
+    /* http_server_start() handles all cleanup internally:
+     * - close old socket fd
+     * - join orphaned thread
+     * So we just need to stop the running thread (if any) and wait for WiFi. */
+
+    http_server_stop();  /* always call — safe even if not running */
 
     /* Wait for WiFi to reconnect: poll nifm for valid IP address.
-     * This is the key fix — we must NOT create a socket until the
-     * network interface is actually back up. */
+     * After sleep/wake, WiFi takes 3-10s to reconnect. If we
+     * bind before WiFi is ready, the socket is unreachable. */
     log_msg("Waiting for WiFi to reconnect...");
     int wifi_wait = 0;
     while (wifi_wait < 30) {  /* up to 30 seconds */
@@ -280,11 +282,40 @@ static Result http_restart(void) {
         log_msg("WiFi not back after 30s, restarting HTTP server anyway.");
     }
 
+    /* Small additional delay: even after IP assignment, the WLAN
+     * interface may need a moment to become fully operational. */
+    svcSleepThread(2000000000ULL);  /* 2 seconds */
+
     http_server_start();
     if (!http_server_is_running()) {
         log_msg("HTTP server restart FAILED.");
         return -1;
     }
+
+    /* Verify: self-connection test */
+    {
+        struct sockaddr_in test_addr;
+        memset(&test_addr, 0, sizeof(test_addr));
+        test_addr.sin_family = AF_INET;
+        test_addr.sin_port = htons(HTTP_PORT);
+        test_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+        int test_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (test_fd >= 0) {
+            struct timeval tv;
+            tv.tv_sec = 2;
+            tv.tv_usec = 0;
+            setsockopt(test_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+            if (connect(test_fd, (struct sockaddr *)&test_addr, sizeof(test_addr)) == 0) {
+                log_msg("HTTP self-test PASSED.");
+            } else {
+                log_msg("HTTP self-test FAILED - port not reachable!");
+            }
+            close(test_fd);
+        }
+    }
+
     log_msg("HTTP server restarted successfully.");
     return 0;
 }

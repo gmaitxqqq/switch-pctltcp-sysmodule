@@ -28,6 +28,7 @@ static int       s_server_fd = -1;
 static bool      s_running   = false;
 static pthread_t s_thread;
 static volatile int s_generation = 0;  /* bumped on each restart */
+static bool      s_thread_active = false;  /* true after pthread_create, false after join */
 
 /* ------------------------------------------------------------------ */
 /* HTTP helpers                                                        */
@@ -295,8 +296,25 @@ void http_server_start(void)
 {
     struct sockaddr_in addr;
 
+    /* Always close any leftover socket fd before creating a new one.
+     * This handles the case where the HTTP thread exited on its own
+     * (select error after sleep) but http_server_stop() was never called. */
+    if (s_server_fd >= 0) {
+        close(s_server_fd);
+        s_server_fd = -1;
+    }
+
+    /* If there's an orphaned thread (exited but never joined), join it now. */
+    if (s_thread_active) {
+        pthread_join(s_thread, NULL);
+        s_thread_active = false;
+    }
+
     s_server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (s_server_fd < 0) return;
+    if (s_server_fd < 0) {
+        log_msg("http_server_start: socket() failed");
+        return;
+    }
 
     int optval = 1;
     setsockopt(s_server_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
@@ -307,12 +325,14 @@ void http_server_start(void)
     addr.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(s_server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        log_msg("http_server_start: bind() failed");
         close(s_server_fd);
         s_server_fd = -1;
         return;
     }
 
     if (listen(s_server_fd, 4) < 0) {
+        log_msg("http_server_start: listen() failed");
         close(s_server_fd);
         s_server_fd = -1;
         return;
@@ -327,19 +347,20 @@ void http_server_start(void)
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, 0x10000);  /* 64KB */
     pthread_create(&s_thread, &attr, http_thread_func, NULL);
+    s_thread_active = true;
     pthread_attr_destroy(&attr);
+
+    log_msg("http_server_start: OK (fd=%d, gen=%d)", s_server_fd, s_generation);
 }
 
 void http_server_stop(void)
 {
-    /*
-     * After pthread_join, the thread is completely done — no one
-     * is using the socket fd. So close() is safe here.
-     * (The crash was from calling shutdown()/close() BEFORE join,
-     *  while the thread was still in select()/accept().)
-     */
     s_running = false;
-    pthread_join(s_thread, NULL);
+
+    if (s_thread_active) {
+        pthread_join(s_thread, NULL);
+        s_thread_active = false;
+    }
 
     if (s_server_fd >= 0) {
         close(s_server_fd);
