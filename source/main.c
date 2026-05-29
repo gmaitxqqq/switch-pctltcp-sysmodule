@@ -101,29 +101,17 @@ void userAppExit(void) {
 
 /* ---- sysmodule entry point (switch_sysmodule.specs) ---- */
 void userAppMain(void) {
-    (void)argc;
-    (void)argv;
 
     mkdir("/switch", 0777);
     mkdir("/switch/pctltcp-sysmodule", 0777);
 
     svcSleepThread(15000000000ULL);
 
-    /* Get firmware version */
-    {
-        Result rc = setsysInitialize();
-        if (R_SUCCEEDED(rc)) {
-            SetSysFirmwareVersion fw;
-            if (R_SUCCEEDED(setsysGetFirmwareVersion(&fw)))
-                hosversionSet(HOSVERSION_MAKE(fw.major, fw.minor, fw.micro));
-            setsysExit();
-        }
-    }
-
     Result rc = init_services();
     if (R_FAILED(rc)) {
         log_msg("FATAL: init_services failed!");
-        return 1;
+        userAppExit();
+        return;
     }
 
     http_server_start();
@@ -177,5 +165,5 @@ void userAppMain(void) {
         }
     }
 
-    return 0;
+    return;
 }
