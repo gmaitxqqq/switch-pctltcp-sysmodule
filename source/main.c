@@ -14,6 +14,35 @@
 #include "pctl_handler.h"
 #include "http_server.h"
 
+/* ================================================================
+ * Sysmodule CRT0 overrides — CRITICAL for boot survival
+ *
+ * Problem: switch.specs CRT0 calls __appInit() before main().
+ * The default __appInit() checks __nx_applet_type; if it's
+ * not AppletType_None, it tries appletInitialize() which
+ * DOES NOT EXIST in sysmodule context → fatalSimple() → crash.
+ *
+ * Fix: Set __nx_applet_type = 0 and override __appInit/__appExit.
+ * This tells the CRT0 "I'm not an applet, skip that stuff".
+ * ================================================================ */
+u32 __nx_applet_type = 0;           /* AppletType_None — MUST be 0 for sysmodule */
+u32 __nx_fs_num_sessions = 1;       /* Reduce FS session count for sysmodule */
+
+/* Override __appInit: only initialize SM (service manager).
+ * All other services (fs, pctl, nifm, socket, etc.) are
+ * initialized in main() -> init_base_services() / net_init(). */
+Result __appInit(void) {
+    Result rc = smInitialize();
+    if (R_FAILED(rc)) return rc;
+    return 0;
+}
+
+/* Override __appExit: only clean up SM.
+ * All other services are cleaned up in exit_all_services(). */
+void __appExit(void) {
+    smExit();
+}
+
 #define PROGRAM_ID  0x0100000000000023ULL
 #define LOG_FILE    "sdmc:/switch/pctltcp-sysmodule/sysmodule.log"
 #define MAX_LOG_SIZE (100 * 1024)
@@ -277,11 +306,8 @@ static bool s_base_ready = false;
 static Result init_base_services(void) {
     Result rc;
 
-    /* Step 1: Service Manager (required for everything) */
-    rc = smInitialize();
-    if (R_FAILED(rc)) return rc;
-
-    /* Step 2: FS + mount SD card (for logging) */
+    /* Step 1: FS + mount SD card (for logging)
+     * Note: smInitialize() is already called by __appInit() */
     rc = fsInitialize();
     if (R_SUCCEEDED(rc)) {
         rc = fsdevMountSdmc();
@@ -293,15 +319,15 @@ static Result init_base_services(void) {
 
     log_msg("pctltcp-sysmodule starting...");
 
-    /* Step 3: System settings (non-fatal) */
+    /* Step 2: System settings (non-fatal) */
     rc = setsysInitialize();
     log_result("setsysInitialize", rc);
 
-    /* Step 4: Parental control service */
+    /* Step 3: Parental control service */
     rc = pctl_init();
     log_result("pctl_init", rc);
 
-    /* Step 5: PSC power state monitor (non-fatal but very useful) */
+    /* Step 4: PSC power state monitor (non-fatal but very useful) */
     rc = psc_monitor_init();
     log_result("psc_monitor_init", rc);
 
@@ -316,7 +342,7 @@ static void exit_all_services(void) {
     setsysExit();
     fsdevUnmountDevice("sdmc");
     fsExit();
-    smExit();
+    /* Note: smExit() is called by __appExit(), not here */
 }
 
 /* ================================================================

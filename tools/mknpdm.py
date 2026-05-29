@@ -118,12 +118,14 @@ def generate_npdm(config):
     program_id = int(config.get('program_id', '0x0100000000001000'), 16)
     pid_min = int(config.get('program_id_range_min', config.get('program_id', '0x0100000000001000')), 16)
     pid_max = int(config.get('program_id_range_max', config.get('program_id', '0x0100000000001000')), 16)
-    priority = config.get('main_thread_priority', 48)
+    priority = config.get('main_thread_priority', 44)
     cpu_id = config.get('default_cpu_id', 0)
-    stack_size = int(config.get('main_thread_stack_size', '0x8000'), 16)
+    stack_size = int(config.get('main_thread_stack_size', '0x20000'), 16)
     is_64bit = config.get('is_64_bit', True)
+    process_category = config.get('process_category', 1)  # 1 = sysmodule
     addr_space = config.get('address_space_type', 3)
     is_retail = config.get('is_retail', True)
+    pool_partition = config.get('pool_partition', 2)  # 2 = System
     sys_res = int(config.get('system_resource_size', '0'), 16)
     name = config.get('name', 'sysmodule')
     fs_perms = config.get('filesystem_access', {}).get('permissions', '0xFFFFFFFFFFFFFFFF')
@@ -144,7 +146,8 @@ def generate_npdm(config):
     struct.pack_into('<I', acid, 0x204, 0x240 + len(fac_acid) + len(sac_data) + len(kac_data) - 0x200)
     acid[0x208] = 1
     acid[0x209] = 0 if is_retail else 1
-    flags = 1 if is_retail else 0
+    # ACID flags: bit0 = Retail, bits 2-3 = PoolPartition (0=App,1=Applet,2=System,3=NonSecure)
+    flags = (1 if is_retail else 0) | ((pool_partition & 3) << 2)
     struct.pack_into('<I', acid, 0x20C, flags)
     struct.pack_into('<Q', acid, 0x210, pid_min)
     struct.pack_into('<Q', acid, 0x218, pid_max)
@@ -173,6 +176,7 @@ def generate_npdm(config):
     meta[0x00:0x04] = b'META'
     mflags = (1 if is_64bit else 0) | ((addr_space & 7) << 1)
     meta[0x0C] = mflags
+    meta[0x0D] = process_category & 0xFF  # 0=Regular, 1=Sysmodule
     meta[0x0E] = priority & 0xFF
     meta[0x0F] = cpu_id & 0xFF
     struct.pack_into('<I', meta, 0x14, sys_res)
