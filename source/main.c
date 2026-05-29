@@ -242,12 +242,24 @@ static void net_cleanup(void) {
     g_net_up = false;
 }
 
-/* ---- Full network reinit (cleanup + init) ---- */
-static Result net_reinit(void) {
-    net_cleanup();
+/* ---- HTTP server restart (for sleep/wake recovery) ----
+ * Does NOT tear down socket/nifm - in a boot2 sysmodule,
+ * once socketExit() is called, we can't re-acquire the
+ * bsd service session. So we only restart the HTTP layer. */
+static Result http_restart(void) {
+    if (http_server_is_running()) {
+        http_server_stop();
+        log_msg("HTTP server stopped.");
+    }
     /* Small delay to let system services stabilize */
-    svcSleepThread(3000000000ULL);  /* 3 seconds */
-    return net_init();
+    svcSleepThread(2000000000ULL);  /* 2 seconds */
+    http_server_start();
+    if (!http_server_is_running()) {
+        log_msg("HTTP server restart FAILED.");
+        return -1;
+    }
+    log_msg("HTTP server restarted successfully.");
+    return 0;
 }
 
 /* ================================================================
@@ -370,7 +382,7 @@ int main(int argc, char **argv) {
                      "Sleep/wake detected (%llus jump), reinitializing...",
                      (unsigned long long)(t_after - t_before));
             log_msg(msg);
-            net_reinit();
+            http_restart();
             nifm_fail_count = 0;
             continue;
         }
@@ -379,7 +391,7 @@ int main(int argc, char **argv) {
         if (g_net_up && (loop % 5 == 0)) {
             if (!http_server_is_running()) {
                 log_msg("HTTP server down, reinitializing network...");
-                net_reinit();
+                http_restart();
                 nifm_fail_count = 0;
                 continue;
             }
@@ -397,7 +409,7 @@ int main(int argc, char **argv) {
                 nifm_fail_count++;
                 if (nifm_fail_count >= 3) {
                     log_msg("nifm unresponsive (3 failures), reinitializing...");
-                    net_reinit();
+                    http_restart();
                     nifm_fail_count = 0;
                     continue;
                 }
@@ -417,7 +429,7 @@ int main(int argc, char **argv) {
         /* ---- Periodic restart if HTTP died but net is still up ---- */
         if (g_net_up && (loop % 60 == 0) && !http_server_is_running()) {
             log_msg("HTTP server down (periodic check), reinitializing...");
-            net_reinit();
+            http_restart();
             nifm_fail_count = 0;
         }
 
