@@ -33,7 +33,7 @@ CONFIG_JSON	:= pctltcp-sysmodule.json
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
-ARCH		:= -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIE
+ARCH		:= -march=armv8-a -mtune=cortex-a57 -mtp=soft -fpie
 
 CFLAGS		:= -g -Wall -O2 -ffunction-sections \
 			$(ARCH) $(DEFINES)
@@ -43,7 +43,8 @@ CFLAGS		+= $(INCLUDE) -D__SWITCH__ -DVERSION_S=\"1.0.0\"
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 
 ASFLAGS		:= -g $(ARCH)
-LDFLAGS		= -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+
+LDFLAGS	= -specs=$(DEVKITPRO)/libnx/switch_sysmodule.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
 LIBS		:= -lnx
 
@@ -60,38 +61,38 @@ LIBDIRS		:= $(PORTLIBS) $(LIBNX)
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 #---------------------------------------------------------------------------------
 
-export OUTPUT	:=	$(CURDIR)/$(TARGET)
-export TOPDIR	:=	$(CURDIR)
+export OUTPUT	:= $(CURDIR)/$(TARGET)
+export TOPDIR	:= $(CURDIR)
 
-export VPATH	:=	$(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) \
+export VPATH	:= $(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) \
 			$(foreach dir,$(DATA),$(CURDIR)/$(dir))
 
-export DEPSDIR	:=	$(CURDIR)/$(BUILD)
+export DEPSSDIR	:= $(CURDIR)/$(BUILD)
 
-CFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
-CPPFILES	:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
-SFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
-BINFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.*)))
+CFILES		:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
+CPPFILES	:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
+SFILES		:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
+BINFILES	:= $(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.*)))
 
 #---------------------------------------------------------------------------------
 # use CXX for linking C++ projects, CC for C projects
 #---------------------------------------------------------------------------------
 ifeq ($(strip $(CPPFILES)),)
-	export LD	:=	$(CC)
+	export LD	:= $(CC)
 else
-	export LD	:=	$(CXX)
+	export LD	:= $(CXX)
 endif
 
-export OFILES_BIN	:=	$(addsuffix .o,$(BINFILES))
-export OFILES_SRC	:=	$(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
-export OFILES		:=	$(OFILES_BIN) $(OFILES_SRC)
-export HFILES_BIN	:=	$(addsuffix .h,$(subst .,_,$(BINFILES)))
+export OBJFILES_BIN	:= $(addsuffix .o,$(BINFILES))
+export OBJFILES_SRC	:= $(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
+export OBJFILES	:= $(OBJFILES_BIN) $(OBJFILES_SRC)
+export HFILES_BIN	:= $(addsuffix .h,$(subst .,_,$(BINFILES)))
 
-export INCLUDE		:=	$(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
+export INCLUDE	:= $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 			$(foreach dir,$(LIBDIRS),-I$(dir)/include) \
 			-I$(CURDIR)/$(BUILD)
 
-export LIBPATHS		:=	$(foreach dir,$(LIBDIRS),-L$(dir)/lib)
+export LIBPATHS	:= $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
 ifeq ($(strip $(CONFIG_JSON)),)
 	jsons := $(wildcard *.json)
@@ -108,40 +109,40 @@ endif
 
 .PHONY: $(BUILD) clean all
 
-all:	$(BUILD)
+all: $(BUILD)
 
 $(BUILD):
-	@[ -d $@ ] || mkdir -p $@
+	@[-d $@] || mkdir -p $@
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).nro $(TARGET).nsp $(TARGET).nso $(TARGET).nacp exefs.nsp
+	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).sts
 
 #---------------------------------------------------------------------------------
 else
-#---------------------------------------------------------------------------------
-
 .PHONY:	all
 
-DEPENDS	:=	$(OFILES:.o=.d)
+DEPS		:= $(OBJFILES:.o=.d)
 
 #---------------------------------------------------------------------------------
-# main targets - build .nsp (sysmodule format)
+# main targets - build .sts (sysmodule format)
 #---------------------------------------------------------------------------------
-all	:	$(OUTPUT).nsp
+all	:	$(OUTPUT).sts
 
-$(OUTPUT).nsp	:	$(OUTPUT).elf
+$(OUTPUT).sts	:	$(OUTPUT).elf
+	@echo building ... $(notdir $@)
+	@$(NOFDEFAULTS) $< $@
 
-$(OUTPUT).elf	:	$(OFILES)
+$(OUTPUT).elf	:	$(OBJFILES)
 
-$(OFILES_SRC)	: $(HFILES_BIN)
+$(OBJFILES_SRC)	: $(HFILES_BIN)
 
 %.bin.o	%_bin.h :	%.bin
 	@echo $(notdir $<)
 	@$(bin2o)
 
--include $(DEPENDS)
+-include $(DEPS)
 
 #---------------------------------------------------------------------------------------
 endif

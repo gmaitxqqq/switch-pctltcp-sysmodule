@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   build:
@@ -23,18 +24,18 @@ jobs:
           make clean
           make -j$(nproc)
           echo "=== Output files ==="
-          ls -la *.nsp *.elf exefs.nsp 2>/dev/null || true
+          ls -la *.sts *.elf 2>/dev/null || true
 
-      - name: Prepare exefs.nsp
+      - name: List output
         run: |
-          if [ -f pctltcp-sysmodule.nsp ]; then
-            cp pctltcp-sysmodule.nsp exefs.nsp
-            echo "Copied pctltcp-sysmodule.nsp -> exefs.nsp"
-          fi
-          ls -la exefs.nsp 2>/dev/null || echo "exefs.nsp not found!"
+          echo "=== All .sts files ==="
+          find . -name "*.sts" -ls 2>/dev/null || echo "No .sts files found"
+          echo "=== Build dir ==="
+          ls -la build/ 2>/dev/null || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: pctltcp-sysmodule
-          path: exefs.nsp
+          path: pctltcp-sysmodule.sts
+          if-no-files-found: error
