@@ -19,9 +19,9 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 TARGET		:= pctltcp-sysmodule
 
-# boot2 sysmodule - use switch.specs + int main()
-APPLET_TYPE	:=
-NODEFAULTFW	:=
+# boot2 sysmodule - APPLET_TYPE := 4 -> userAppMain() entry
+APPLET_TYPE	:= 4
+NODEFAULTFW	:= 1
 
 BUILD		:= build
 SOURCES		:= source
