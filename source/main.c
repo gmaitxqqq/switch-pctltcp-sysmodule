@@ -2,10 +2,12 @@
 // Build: make -> pctltcp-sysmodule.nsp (with APP_JSON)
 // Install: sd:/atmosphere/contents/010000000000BD23/exefs.nsp + flags/boot2.flag
 //
-// v1.7d: Fix false "Network lost" detection.
-//         Wait for IP address assignment in net_init() to avoid premature timeout.
-//         Proactive network detection: check network status in main loop,
-//         restart HTTP server when network is restored after sleep/wake.
+// v1.4.1: Sleep/wake detection via time-jump.
+//         v1.4 health checks missed some sleep/wake events because
+//         nifm could appear healthy while sockets were stale.
+//         Now we detect time jumps (>5s) in the main loop, which
+//         indicates the system was suspended (sleep), and force a
+//         full network reinit on wake.
 
 #include <switch.h>
 #include <stdio.h>
@@ -14,37 +16,38 @@
 #include <unistd.h>
 #include <time.h>
 #include <sys/stat.h>
-#include <stdarg.h>
 
 #include "pctl_handler.h"
 #include "http_server.h"
 
-/* ---- Global state (declared before all functions) ---- */
-static bool g_net_up        = false;
-static bool g_bsd_initialized = false;
+/* ================================================================
+ * Sysmodule CRT0 overrides - CRITICAL for boot survival
+ * ================================================================ */
 
-/* =============================================================== */
-/* Sysmodule CRT0 overrides - CRITICAL for boot survival   */
-/* =============================================================== */
+#define INNER_HEAP_SIZE 0x80000  /* 512 KiB - same as sys-con */
 
-#define INNER_HEAP_SIZE 0x80000
+/* ---- CRT0 global overrides ---- */
+u32 __nx_applet_type = AppletType_None;  /* 0 - no applet */
+u32 __nx_fs_num_sessions = 2;            /* FS sessions for sysmodule */
 
-u32  __nx_applet_type = AppletType_None;
-u32  __nx_fs_num_sessions = 2;
-
-void  __libnx_initheap(void) {
+/* ---- Custom heap ---- */
+void __libnx_initheap(void) {
     static u8 inner_heap[INNER_HEAP_SIZE];
     extern void *fake_heap_start;
     extern void *fake_heap_end;
+
     fake_heap_start = inner_heap;
     fake_heap_end   = inner_heap + sizeof(inner_heap);
 }
 
+/* ---- __appInit - initialize all needed services ---- */
 Result __appInit(void) {
     Result rc;
+
     rc = smInitialize();
     if (R_FAILED(rc)) return rc;
 
+    /* Get firmware version - REQUIRED for libnx version-aware functions */
     rc = setsysInitialize();
     if (R_SUCCEEDED(rc)) {
         SetSysFirmwareVersion fw;
@@ -55,35 +58,40 @@ Result __appInit(void) {
         setsysExit();
     }
 
+    /* NOTE: Removed pscmInitialize() - we no longer use PSC monitoring.
+     * PSC with WlanSockets/Nifm dependencies caused the system to freeze
+     * on wake from sleep because the PSC scheduler deadlocked waiting
+     * for WlanSockets to reinitialize while our module still held stale
+     * IPC sessions. Instead, we detect broken networking via health
+     * checks in the main loop and reinitialize automatically. */
+
     rc = fsInitialize();
     if (R_FAILED(rc)) return rc;
 
+    /* Time service - REQUIRED for correct day-of-week calculation.
+     * Without this, time(NULL) returns epoch 0 (Thursday 1970-01-01). */
     rc = timeInitialize();
-    if (R_FAILED(rc)) { }
+    if (R_FAILED(rc)) {
+        /* Non-fatal: pctl day-of-week may be wrong, but module can still run */
+    }
 
+    /* DO NOT call smExit() here! We need SM for nifm/pctl later. */
     rc = fsdevMountSdmc();
     if (R_FAILED(rc)) return rc;
 
     return 0;
 }
 
+/* ---- __appExit ---- */
 void __appExit(void) {
-    if (g_net_up) {
-        http_server_stop();
-        nifmExit();
-        socketExit();
-    } else {
-        /* nifm was never initialized, but bsd:ux might be up */
-        if (g_bsd_initialized)
-            socketExit();
-    }
     fsdevUnmountAll();
     fsExit();
     timeExit();
-    smExit();
+    smExit();  /* SM is kept alive for the entire process lifetime */
 }
 
 /* ---- Constants ---- */
+#define PROGRAM_ID  0x010000000000BD23ULL
 #define LOG_FILE    "sdmc:/switch/pctltcp-sysmodule/sysmodule.log"
 #define MAX_LOG_SIZE (100 * 1024)
 
@@ -102,194 +110,340 @@ static void rotate_log_if_needed(void) {
     }
 }
 
-__attribute__((format(printf,1,2)))
-static void log_msg(const char *fmt, ...) {
+void log_msg(const char *msg) {
     rotate_log_if_needed();
     FILE *f = fopen(LOG_FILE, "a");
-    if (!f) return;
+    if (f) {
+        /* Try all clock sources for reliable timestamps */
+        u64 now_posix = 0;
+        Result rc = timeGetCurrentTime(TimeType_NetworkSystemClock, &now_posix);
+        if (R_FAILED(rc) || now_posix <= 946684800ULL) {
+            rc = timeGetCurrentTime(TimeType_LocalSystemClock, &now_posix);
+        }
+        if (R_FAILED(rc) || now_posix <= 946684800ULL) {
+            rc = timeGetCurrentTime(TimeType_UserSystemClock, &now_posix);
+        }
 
-    /* timestamp */
-    time_t now = time(NULL);
-    struct tm *tm = localtime(&now);
-    if (tm) {
-        fprintf(f, "[%04d-%02d-%02d %02d:%02d:%02d] ",
-                tm->tm_year+1900, tm->tm_mon+1, tm->tm_mday,
-                tm->tm_hour, tm->tm_min, tm->tm_sec);
+        if (R_SUCCEEDED(rc) && now_posix > 946684800ULL) {
+            TimeCalendarTime cal;
+            TimeCalendarAdditionalInfo additional;
+
+            rc = timeToCalendarTimeWithMyRule(now_posix, &cal, &additional);
+            if (R_FAILED(rc)) {
+                /* Try again - sometimes first call fails in sysmodule context */
+                rc = timeToCalendarTimeWithMyRule(now_posix, &cal, &additional);
+            }
+
+            if (R_SUCCEEDED(rc)) {
+                fprintf(f, "[%04d-%02d-%02d %02d:%02d:%02d] %s\n",
+                        cal.year, cal.month, cal.day,
+                        cal.hour, cal.minute, cal.second, msg);
+                fclose(f);
+                return;
+            }
+        }
+        /* Fallback: no timestamp */
+        fprintf(f, "[?] %s\n", msg);
+        fclose(f);
     }
-
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
-    va_end(ap);
-    fputc('\n', f);
-    fclose(f);
 }
 
-/* ============================================================= */
-/* Network helpers - keep bsd:ux alive for entire process      */
-/* ============================================================= */
-
-static bool net_is_online(void) {
-    if (!g_net_up) return false;
-    u32 ip = 0;
-    Result rc = nifmGetCurrentIpAddress(&ip);
-    return (R_SUCCEEDED(rc) && ip != 0);
+static void log_result(const char *ctx, Result rc) {
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s: %s (0x%08X)",
+             ctx, R_SUCCEEDED(rc) ? "OK" : "FAILED", (unsigned)rc);
+    log_msg(buf);
 }
 
-static void net_cleanup(void) {
-    if (g_net_up) {
-        http_server_stop();
-        nifmExit();
-        g_net_up = false;
-    }
-    /* Do NOT call socketExit() - keep bsd:ux alive */
+/* ---- IP to string ---- */
+static void ip_to_str(u32 ip, char *buf, size_t bufsize) {
+    snprintf(buf, bufsize, "%d.%d.%d.%d",
+             (int)((ip >>  0) & 0xFF),
+             (int)((ip >>  8) & 0xFF),
+             (int)((ip >> 16) & 0xFF),
+             (int)((ip >> 24) & 0xFF));
 }
 
+/* ================================================================
+ * Network service management
+ * ================================================================ */
+
+static bool g_net_up = false;
+
+/* ---- Network init ---- */
 static Result net_init(void) {
     Result rc;
 
-    /*
-     * Initialize bsd:ux ONCE for the entire process lifetime.
-     * Never call socketExit() until process exit (__appExit).
-     */
-    if (!g_bsd_initialized) {
-        int retry = 0;
-        while (retry < 10) {
-            rc = socketInitializeDefault();
-            if (R_SUCCEEDED(rc)) break;
-            log_msg("socketInitializeDefault failed: 0x%X (retry %d/10)", rc, retry+1);
-            svcSleepThread(2000000000ULL);  /* wait 2 seconds */
-            retry++;
-        }
-        if (R_FAILED(rc)) {
-            log_msg("socketInitializeDefault failed after 10 retries, giving up.");
-            return rc;
-        }
-        g_bsd_initialized = true;
-        log_msg("bsd:ux initialized (one-time, process lifetime).");
-    }
-
-    /* Initialize nifm service */
-    rc = nifmInitialize(NifmServiceType_User);
+    /* Network interface manager - try System type for sysmodule context */
+    rc = nifmInitialize(NifmServiceType_System);
     if (R_FAILED(rc)) {
-        log_msg("nifmInitialize failed: 0x%X", rc);
+        rc = nifmInitialize(NifmServiceType_User);
+    }
+    if (R_FAILED(rc)) {
+        log_result("nifmInitialize", rc);
         return rc;
     }
+
+    /* Sockets - use System service type with explicit config */
+    SocketInitConfig cfg = {
+        .tcp_tx_buf_size = 0x4000,
+        .tcp_rx_buf_size = 0x4000,
+        .tcp_tx_buf_max_size = 0x10000,
+        .tcp_rx_buf_max_size = 0x10000,
+        .udp_tx_buf_size = 0x1000,
+        .udp_rx_buf_size = 0x4000,
+        .sb_efficiency = 2,
+        .bsd_service_type = BsdServiceType_System,
+    };
+    rc = socketInitialize(&cfg);
+    if (R_FAILED(rc)) {
+        log_result("socketInitialize", rc);
+        nifmExit();
+        return rc;
+    }
+
+    /* HTTP server */
+    http_server_start();
+    if (!http_server_is_running()) {
+        log_msg("HTTP server start FAILED.");
+        socketExit();
+        nifmExit();
+        return -1;
+    }
+
     g_net_up = true;
-    log_msg("nifm initialized.");
-
-    /* Wait for IP address to become available */
-    log_msg("Waiting for IP address...");
-    u32 ipaddr = 0;
-    int waited = 0;
-    while (waited < 30) {
-        rc = nifmGetCurrentIpAddress(&ipaddr);
-        if (R_SUCCEEDED(rc) && ipaddr != 0)
-            break;
-        svcSleepThread(1000000000ULL);
-        waited++;
-    }
-
-    if (waited >= 30 || R_FAILED(rc) || ipaddr == 0) {
-        log_msg("IP address not available after 30 seconds, rc=0x%X, ip=%08X", rc, ipaddr);
-        net_cleanup();
-        return MAKERESULT(Module_Custom, 1);
-    }
-
-    log_msg("IP address acquired: %d.%d.%d.%d",
-            (ipaddr >> 0) & 0xFF,
-            (ipaddr >> 8) & 0xFF,
-            (ipaddr >> 16) & 0xFF,
-            (ipaddr >> 24) & 0xFF);
-
-    /* Start HTTP server */
-    rc = http_server_start();
-    if (R_FAILED(rc)) {
-        log_msg("http_server_start failed: 0x%X", rc);
-        net_cleanup();
-        return rc;
-    }
-
     log_msg("Network services initialized, HTTP server started.");
+
+    /* Log IP address */
+    char ip[64] = {0};
+    u32 ipaddr = 0;
+    if (R_SUCCEEDED(nifmGetCurrentIpAddress(&ipaddr)) && ipaddr != 0) {
+        ip_to_str(ipaddr, ip, sizeof(ip));
+        char msg[256];
+        snprintf(msg, sizeof(msg), "Web UI: http://%s:%d", ip, HTTP_PORT);
+        log_msg(msg);
+    }
+
     return 0;
 }
 
-/* ============================================================= */
-/* Main                                                          */
-/* ============================================================= */
-
-int main(int argc, char **argv) {
-    (void)argc; (void)argv;
-
-    log_msg("pctltcp-sysmodule starting (v1.7d)...");
-
-    /* Load timezone */
-    FILE *tz = fopen("sdmc:/switch/pctltcp-sysmodule/tz.txt", "r");
-    if (tz) {
-        char tzbuf[64] = {0};
-        if (fgets(tzbuf, sizeof(tzbuf), tz)) {
-            tzbuf[strcspn(tzbuf, "\r\n")] = 0;
-            setenv("TZ", tzbuf, 1);
-            tzset();
-        }
-        fclose(tz);
-        log_msg("Timezone rule loaded successfully.");
+/* ---- Network cleanup ---- */
+static void net_cleanup(void) {
+    if (http_server_is_running()) {
+        http_server_stop();
+        log_msg("HTTP server stopped.");
     }
 
-    /* Time service */
-    time_t now = time(NULL);
-    log_msg("Time service: OK (time=%ld, rc=0x%X)", now, 0);
+    if (g_net_up) {
+        socketExit();
+        nifmExit();
+        log_msg("Network services cleaned up.");
+    }
+    g_net_up = false;
+}
 
-    /* Initialize network and HTTP server */
-    Result rc = net_init();
+/* ---- Full network reinit (cleanup + init) ---- */
+static Result net_reinit(void) {
+    net_cleanup();
+    /* Small delay to let system services stabilize */
+    svcSleepThread(3000000000ULL);  /* 3 seconds */
+    return net_init();
+}
+
+/* ================================================================
+ * Main service init - called once at startup
+ * ================================================================ */
+static bool s_base_ready = false;
+
+static Result init_services(void) {
+    /* Create log directory */
+    mkdir("sdmc:/switch", 0777);
+    mkdir("sdmc:/switch/pctltcp-sysmodule", 0777);
+
+    log_msg("pctltcp-sysmodule starting (v1.4.1 - sleep fix)...");
+
+    /* Load timezone rule for correct day-of-week calculation.
+     * This MUST be called after timeInitialize() (which is in __appInit).
+     * Without this, timeToCalendarTimeWithMyRule() may fail in sysmodule
+     * context, causing pctl_get_today_day() to return the wrong day. */
+    {
+        Result tz_rc = pctl_load_timezone();
+        if (R_FAILED(tz_rc)) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "WARNING: timezone load failed (0x%08X), day-of-week may be wrong", (unsigned)tz_rc);
+            log_msg(buf);
+        } else {
+            log_msg("Timezone rule loaded successfully.");
+        }
+    }
+
+    /* Log time service status */
+    {
+        u64 test_time = 0;
+        Result time_rc = timeGetCurrentTime(TimeType_NetworkSystemClock, &test_time);
+        if (R_FAILED(time_rc)) {
+            time_rc = timeGetCurrentTime(TimeType_UserSystemClock, &test_time);
+        }
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Time service: %s (time=%llu, rc=0x%08X)",
+                 R_SUCCEEDED(time_rc) ? "OK" : "FAILED",
+                 (unsigned long long)test_time, (unsigned)time_rc);
+        log_msg(buf);
+    }
+
+    s_base_ready = true;
+    return 0;
+}
+
+/* ================================================================
+ * sysmodule entry point
+ * ================================================================ */
+int main(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+
+    /* At boot2, many services are not yet registered with SM.
+     * Wait longer for the system to finish initializing services. */
+    svcSleepThread(15000000000ULL);  /* 15 seconds */
+
+    /* Initialize base services (time, timezone, etc.) */
+    Result rc = init_services();
     if (R_FAILED(rc)) {
-        log_msg("Initial network init failed (rc=0x%X), will retry in main loop.", rc);
-    } else {
-        u32 ip = 0;
-        nifmGetCurrentIpAddress(&ip);
-        char ipstr[64];
-        snprintf(ipstr, sizeof(ipstr), "Web UI: http://%d.%d.%d.%d:%d",
-                (ip >> 0) & 0xFF, (ip >> 8) & 0xFF,
-                (ip >> 16) & 0xFF, (ip >> 24) & 0xFF,
-                HTTP_PORT);
-        log_msg("%s", ipstr);
+        log_msg("FATAL: Service initialization failed, entering idle loop.");
+    }
+
+    /* Initialize network (socket, nifm, HTTP server) with sparse retry. */
+    if (s_base_ready) {
+        for (int attempt = 0; attempt < 30; attempt++) {
+            rc = net_init();
+            if (R_SUCCEEDED(rc)) break;
+            svcSleepThread(5000000000ULL);  /* 5 seconds */
+        }
+        if (R_FAILED(rc)) {
+            log_msg("WARNING: Network init failed after 30 retries");
+        }
     }
 
     log_msg("pctltcp-sysmodule initialization complete.");
 
-    /* Main loop: retry on boot + monitor sleep/wake */
-    while (1) {
-        svcSleepThread(1000000000ULL);
+    /* ---- Main loop ----
+     *
+     * No PSC monitoring - we use health checks instead.
+     *
+     * When the system goes to sleep, all threads are suspended.
+     * When it wakes up, threads resume but networking may be broken
+     * (WlanSockets reinitializes and invalidates old sockets).
+     *
+     * The HTTP server thread detects broken sockets via select()/accept()
+     * errors and exits cleanly. This main loop then detects the server
+     * is no longer running and does a full network reinit.
+     *
+     * Health check strategy:
+     * - Every 5 seconds: check if HTTP server is still running
+     * - Every 10 seconds: check if nifm is responsive
+     * - Every 30 seconds: retry network init if it's down
+     * - Every 5 minutes: check for IP address changes
+     */
+    u64 loop = 0;
+    char last_ip[64] = {0};
+    u64 last_ip_check = 0;
+    int nifm_fail_count = 0;  /* Consecutive nifm failures */
 
-        /* Network not yet up: keep retrying until it comes up */
-        if (!g_net_up) {
-            static int retry_count = 0;
-            if (++retry_count >= 3) {
-                retry_count = 0;
-                log_msg("Retrying network init...");
-                Result retry_rc = net_init();
-                if (R_SUCCEEDED(retry_rc)) {
-                    u32 retry_ip = 0;
-                    nifmGetCurrentIpAddress(&retry_ip);
-                    char ipstr[64];
-                    snprintf(ipstr, sizeof(ipstr), "Web UI: http://%d.%d.%d.%d:%d",
-                            (retry_ip >> 0) & 0xFF, (retry_ip >> 8) & 0xFF,
-                            (retry_ip >> 16) & 0xFF, (retry_ip >> 24) & 0xFF,
-                            HTTP_PORT);
-                    log_msg("Network init succeeded: %s", ipstr);
-                }
-            }
-            continue;  /* skip online check while network is still down */
+    while (1) {
+        /* ---- Sleep/wake detection ----
+         * On Switch, svcSleepThread(1s) suspends the thread. If the system
+         * enters sleep mode, the thread stays suspended until wake.
+         * By comparing timestamps before & after, we can detect sleep/wake
+         * events and force a full network reinit.
+         *
+         * Skip the first 5 loops (5s) to avoid false positives at boot. */
+        u64 t_before = 0;
+        timeGetCurrentTime(TimeType_UserSystemClock, &t_before);
+        svcSleepThread(1000000000ULL);  /* 1 second (could be longer if slept) */
+        u64 t_after = 0;
+        timeGetCurrentTime(TimeType_UserSystemClock, &t_after);
+        loop++;
+
+        if (loop > 5 && g_net_up && (t_after - t_before) > 5) {
+            char msg[256];
+            snprintf(msg, sizeof(msg),
+                     "Sleep/wake detected (%llus jump), reinitializing...",
+                     (unsigned long long)(t_after - t_before));
+            log_msg(msg);
+            net_reinit();
+            nifm_fail_count = 0;
+            continue;
         }
 
-        /* Network is up: detect sleep/wake transitions */
-        bool online = net_is_online();
-        if (!online) {
-            log_msg("Network lost (sleep?). Stopping HTTP server.");
-            net_cleanup();
+        /* ---- Health check: HTTP server running? ---- */
+        if (g_net_up && (loop % 5 == 0)) {
+            if (!http_server_is_running()) {
+                log_msg("HTTP server down, reinitializing network...");
+                net_reinit();
+                nifm_fail_count = 0;
+                continue;
+            }
+        }
+
+        /* ---- Health check: nifm responsive? ----
+         * After sleep/wake, the network interface may be broken even
+         * though the HTTP server thread hasn't detected it yet.
+         * If nifmGetCurrentIpAddress() fails repeatedly, networking
+         * is broken and we need to reinit. */
+        if (g_net_up && (loop % 10 == 0)) {
+            u32 ipaddr = 0;
+            Result nifm_rc = nifmGetCurrentIpAddress(&ipaddr);
+            if (R_FAILED(nifm_rc)) {
+                nifm_fail_count++;
+                if (nifm_fail_count >= 3) {
+                    log_msg("nifm unresponsive (3 failures), reinitializing...");
+                    net_reinit();
+                    nifm_fail_count = 0;
+                    continue;
+                }
+            } else {
+                nifm_fail_count = 0;
+            }
+        }
+
+        /* ---- Startup retry: if network is not up yet ---- */
+        if (!g_net_up && s_base_ready && (loop % 30 == 0)) {
+            rc = net_init();
+            if (R_SUCCEEDED(rc)) {
+                log_msg("Network init succeeded on retry!");
+            }
+        }
+
+        /* ---- Periodic restart if HTTP died but net is still up ---- */
+        if (g_net_up && (loop % 60 == 0) && !http_server_is_running()) {
+            log_msg("HTTP server down (periodic check), reinitializing...");
+            net_reinit();
+            nifm_fail_count = 0;
+        }
+
+        /* ---- Check for IP change every 5 minutes ---- */
+        if (g_net_up && (loop - last_ip_check >= 300)) {
+            char new_ip[64] = {0};
+            u32 a = 0;
+            if (R_SUCCEEDED(nifmGetCurrentIpAddress(&a)) && a != 0) {
+                ip_to_str(a, new_ip, sizeof(new_ip));
+            }
+            if (new_ip[0] && strcmp(last_ip, new_ip) != 0) {
+                char m[256];
+                snprintf(m, sizeof(m), "IP changed: %s -> %s",
+                         last_ip[0] ? last_ip : "(none)", new_ip);
+                log_msg(m);
+                strcpy(last_ip, new_ip);
+                {
+                    char u[256];
+                    snprintf(u, sizeof(u), "Web UI: http://%s:%d", new_ip, HTTP_PORT);
+                    log_msg(u);
+                }
+            }
+            last_ip_check = loop;
         }
     }
 
-    /* Unreachable, but keep compiler happy */
+    /* Unreachable */
     return 0;
 }

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * http_server.c - Minimal HTTP server for Switch parental control
  *
  * REST API:
@@ -7,7 +7,7 @@
  *   POST /api/allow     -> Add minutes to today's limit (additive)
  *                          body: minutes=N
  *                          calc: new_limit = current_limit + N
- *   Version: v1.7d
+ *   Version: v1.3
  */
 #include "http_server.h"
 #include "pctl_handler.h"
@@ -20,7 +20,6 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <pthread.h>
-#include <fcntl.h>
 
 /* ------------------------------------------------------------------ */
 /* State                                                               */
@@ -95,7 +94,7 @@ static void api_status(int fd)
     char json[256];
     static const char *day_names[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
     snprintf(json, sizeof(json),
-        "{\"daily_limit_min\":%u,\"remaining_min\":%u,\"played_min\":%u,\"today\":%d,\"today_name\":\"%s\",\"version\":\"v1.7d\"}",
+        "{\"daily_limit_min\":%u,\"remaining_min\":%u,\"played_min\":%u,\"today\":%d,\"today_name\":\"%s\",\"version\":\"v1.3\"}",
         daily_limit, remaining_min, played_min, today, day_names[today]);
 
     http_send(fd, "200 OK", "application/json", json);
@@ -148,7 +147,7 @@ static const char *WEB_HTML =
 "<head>"
 "<meta charset='UTF-8'>"
 "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-"<title>Switch Timer v1.7d</title>"
+"<title>Switch Timer v1.3</title>"
 "<style>"
 "body{font-family:sans-serif;background:#1a1a2e;color:#fff;text-align:center;padding:20px;margin:0}"
 ".box{background:rgba(255,255,255,0.1);border-radius:12px;padding:20px;margin:15px 0}"
@@ -165,7 +164,7 @@ static const char *WEB_HTML =
 "</style>"
 "</head>"
 "<body>"
-"<h2>Switch Parental Control <small>v1.7d</small></h2>"
+"<h2>Switch Parental Control <small>v1.3</small></h2>"
 "<div class='box'>"
 "<div class='row'>"
 "<div class='tile'><div class='lbl'>Played</div><div class='big' id='played'>--</div></div>"
@@ -246,7 +245,7 @@ static void handle_request(int fd)
 }
 
 /* ------------------------------------------------------------------ */
-/* Server thread — select() with 1-sec timeout, no self-pipe needed  */
+/* Server thread                                                       */
 /* ------------------------------------------------------------------ */
 static void *http_thread_func(void *arg)
 {
@@ -256,29 +255,33 @@ static void *http_thread_func(void *arg)
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(s_server_fd, &rfds);
-
         struct timeval tv;
-        tv.tv_sec  = 1;   /* 1-second timeout -> thread wakes up every 1s */
-        tv.tv_usec = 0;
+        tv.tv_sec = 0;
+        tv.tv_usec = 500000;
 
         int ret = select(s_server_fd + 1, &rfds, NULL, NULL, &tv);
         if (ret < 0) {
-            /* select() error -> exit thread */
+            /* Socket error — likely broken after system sleep/wake.
+             * The WlanSockets module reinitializes on wake and invalidates
+             * old sockets. Exit the thread so the main loop can detect
+             * the failure and do a full network reinit. */
+            s_running = false;
             break;
         }
-        if (ret == 0) continue;  /* timeout, re-check s_running */
+        if (ret == 0) continue;  /* Timeout, no incoming connection */
 
         if (FD_ISSET(s_server_fd, &rfds)) {
             int client_fd = accept(s_server_fd, NULL, NULL);
             if (client_fd < 0) {
-                /* accept error -> socket might be closed, exit thread */
+                /* Accept error — socket might be broken after sleep/wake.
+                 * Same as select error: exit and let main loop reinit. */
+                s_running = false;
                 break;
             }
             handle_request(client_fd);
         }
     }
 
-    s_running = false;  /* ensure flag is false when thread exits */
     return NULL;
 }
 
@@ -286,17 +289,14 @@ static void *http_thread_func(void *arg)
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
 
-Result http_server_start(void)
+void http_server_start(void)
 {
     struct sockaddr_in addr;
-    int optval = 1;
 
-    /* Create socket first */
     s_server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (s_server_fd < 0) {
-        return MAKERESULT(Module_Custom, 1);
-    }
+    if (s_server_fd < 0) return;
 
+    int optval = 1;
     setsockopt(s_server_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
 
     memset(&addr, 0, sizeof(addr));
@@ -307,44 +307,36 @@ Result http_server_start(void)
     if (bind(s_server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         close(s_server_fd);
         s_server_fd = -1;
-        return MAKERESULT(Module_Custom, 2);
+        return;
     }
 
     if (listen(s_server_fd, 4) < 0) {
         close(s_server_fd);
         s_server_fd = -1;
-        return MAKERESULT(Module_Custom, 3);
+        return;
     }
 
     s_running = true;
 
+    /* Use explicit stack size for the HTTP server thread.
+     * Default pthread stack on Switch/newlib is often too small. */
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, 0x10000);  /* 64KB */
     pthread_create(&s_thread, &attr, http_thread_func, NULL);
     pthread_attr_destroy(&attr);
-
-    return 0;  /* Success */
 }
 
 void http_server_stop(void)
 {
-    if (!s_running && s_server_fd < 0) return;
-
-    /* Signal the thread to exit */
     s_running = false;
 
-    /* Close the server socket to unblock accept() / select().
-     * On Switch, closing from another thread may not immediately
-     * wake select(), but the 1-sec timeout in http_thread_func()
-     * guarantees the thread will notice s_running=false within 1 sec. */
     if (s_server_fd >= 0) {
         shutdown(s_server_fd, SHUT_RDWR);
         close(s_server_fd);
         s_server_fd = -1;
     }
 
-    /* Wait for the thread to exit (at most ~1 second due to select timeout) */
     pthread_join(s_thread, NULL);
 }
 
