@@ -64,22 +64,33 @@ static void ip_to_str(u32 ip, char *buf, size_t bufsize) {
 
 /* ================================================================
  * PSC Power State Monitor
- * Based on sys-con / MissionControl pattern.
  *
- * When the Switch goes to sleep, we must:
+ * When the Switch goes to sleep:
  *   - Stop the HTTP server
  *   - Close network sockets
  *   - Acknowledge sleep to PSC so the system can enter sleep
  *
- * When the Switch wakes up, we must:
+ * When the Switch wakes up:
  *   - Re-initialize sockets
  *   - Re-start the HTTP server
  *   - Log the new IP address
+ *
+ * Based on libnx psc.h API (actual function signatures):
+ *   pscmGetPmModule(out, module_id, deps, dep_count, autoclear)
+ *   pscPmModuleGetRequest(module, &state, &flags)
+ *   pscPmModuleAcknowledge(module, state)
+ *   pscPmModuleFinalize(module)
+ *
+ * PscPmState enum:
+ *   PscPmState_Awake = 0
+ *   PscPmState_ReadyAwaken = 1
+ *   PscPmState_ReadySleep = 2
+ *   PscPmState_ReadyShutdown = 5
  * ================================================================ */
 
 static PscPmModule g_psc_module;
 static Thread      g_psc_thread;
-static UEvent      g_psc_exit_event;    /* signal to stop PSC thread */
+static UEvent      g_psc_exit_event;
 static bool        g_psc_active = false;
 
 /* Are our network services (socket + HTTP) currently up? */
@@ -155,7 +166,7 @@ static void psc_thread_func(void *arg) {
 
     while (true) {
         s32 idx = -1;
-        Result rc = waitMulti(&idx, U64_MAX, psc_waiter, exit_waiter);
+        Result rc = waitMulti(&idx, UINT64_MAX, psc_waiter, exit_waiter);
         if (R_FAILED(rc)) continue;
 
         /* Exit signal */
@@ -168,8 +179,8 @@ static void psc_thread_func(void *arg) {
         if (R_FAILED(rc)) continue;
 
         switch (state) {
-            case PscPmState_FullAwake:       /* 0 - system fully awake */
-            case PscPmState_MinimumAwake:    /* 1 - waking up         */
+            case PscPmState_Awake:             /* 0 - system fully awake */
+            case PscPmState_ReadyAwaken:       /* 1 - waking up from sleep */
                 log_msg("PSC: Wake up detected, re-initializing network...");
                 net_cleanup();
                 /* Small delay to let network interface come up */
@@ -177,12 +188,12 @@ static void psc_thread_func(void *arg) {
                 net_init();
                 break;
 
-            case PscPmState_SleepReady:      /* 2 - preparing to sleep */
+            case PscPmState_ReadySleep:        /* 2 - preparing to sleep */
                 log_msg("PSC: Sleep requested, cleaning up network...");
                 net_cleanup();
                 break;
 
-            case PscPmState_ShutdownReady:   /* 5 - preparing to shutdown */
+            case PscPmState_ReadyShutdown:     /* 5 - preparing to shutdown */
                 log_msg("PSC: Shutdown requested, cleaning up...");
                 net_cleanup();
                 break;
@@ -192,7 +203,7 @@ static void psc_thread_func(void *arg) {
         }
 
         /* MUST acknowledge — system waits for all modules before state change */
-        pscPmModuleAcknowledgeEx(&g_psc_module, state);
+        pscPmModuleAcknowledge(&g_psc_module, state);
     }
 }
 
@@ -206,19 +217,16 @@ static Result psc_monitor_init(void) {
         return rc;
     }
 
-    rc = pscmGetPmModule(&g_psc_module);
+    /* GetPmModule combines registration + initialization.
+     * Module ID: 0x7E (custom homebrew ID, same as sys-con)
+     * Dependencies: WlanSockets (25) + Nifm (38) — we need network
+     *               to come up before us on wake.
+     * autoclear: true (event auto-resets after wait) */
+    u32 deps[] = { PscPmModuleId_WlanSockets, PscPmModuleId_Nifm };
+    rc = pscmGetPmModule(&g_psc_module, 0x7E,
+                          deps, sizeof(deps) / sizeof(u32), true);
     if (R_FAILED(rc)) {
         log_result("pscmGetPmModule", rc);
-        pscmExit();
-        return rc;
-    }
-
-    /* Register as module 0x7E (custom homebrew ID), depend on Fs */
-    u32 deps[] = { PscPmModuleId_Fs };
-    rc = pscPmModuleInitialize(&g_psc_module, 0x7E, deps, sizeof(deps)/sizeof(u32));
-    if (R_FAILED(rc)) {
-        log_result("pscPmModuleInitialize", rc);
-        pscPmModuleClose(&g_psc_module);
         pscmExit();
         return rc;
     }
@@ -229,7 +237,6 @@ static Result psc_monitor_init(void) {
                       NULL, 0x1000, 0x2C, -2);
     if (R_FAILED(rc)) {
         log_result("threadCreate(psc)", rc);
-        pscPmModuleFinalize(&g_psc_module);
         pscPmModuleClose(&g_psc_module);
         pscmExit();
         return rc;
@@ -239,7 +246,6 @@ static Result psc_monitor_init(void) {
     if (R_FAILED(rc)) {
         log_result("threadStart(psc)", rc);
         threadClose(&g_psc_thread);
-        pscPmModuleFinalize(&g_psc_module);
         pscPmModuleClose(&g_psc_module);
         pscmExit();
         return rc;
@@ -266,7 +272,7 @@ static void psc_monitor_exit(void) {
 /* ================================================================
  * Main service init — called once at startup
  * ================================================================ */
-static bool s_base_ready = false;   /* sm + fs + setsys + pctl */
+static bool s_base_ready = false;
 
 static Result init_base_services(void) {
     Result rc;
