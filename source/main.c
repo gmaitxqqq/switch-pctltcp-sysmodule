@@ -1,4 +1,4 @@
-﻿// pctltcp-sysmodule - Switch Parental Control Web Server (boot2 sysmodule)
+// pctltcp-sysmodule - Switch Parental Control Web Server (boot2 sysmodule)
 // Build: make -> pctltcp-sysmodule.nsp (with APP_JSON)
 // Install: sd:/atmosphere/contents/010000000000BD23/exefs.nsp + flags/boot2.flag
 
@@ -14,13 +14,13 @@
 #include "http_server.h"
 
 /* ================================================================
- * Sysmodule CRT0 overrides — CRITICAL for boot survival
+ * Sysmodule CRT0 overrides - CRITICAL for boot survival
  * ================================================================ */
 
-#define INNER_HEAP_SIZE 0x80000  /* 512 KiB — same as sys-con */
+#define INNER_HEAP_SIZE 0x80000  /* 512 KiB - same as sys-con */
 
 /* ---- CRT0 global overrides ---- */
-u32 __nx_applet_type = AppletType_None;  /* 0 — no applet */
+u32 __nx_applet_type = AppletType_None;  /* 0 - no applet */
 u32 __nx_fs_num_sessions = 2;            /* FS sessions for sysmodule */
 
 /* ---- Custom heap ---- */
@@ -33,14 +33,14 @@ void __libnx_initheap(void) {
     fake_heap_end   = inner_heap + sizeof(inner_heap);
 }
 
-/* ---- __appInit — initialize all needed services ---- */
+/* ---- __appInit - initialize all needed services ---- */
 Result __appInit(void) {
     Result rc;
 
     rc = smInitialize();
     if (R_FAILED(rc)) return rc;
 
-    /* Get firmware version — REQUIRED for libnx version-aware functions */
+    /* Get firmware version - REQUIRED for libnx version-aware functions */
     rc = setsysInitialize();
     if (R_SUCCEEDED(rc)) {
         SetSysFirmwareVersion fw;
@@ -98,8 +98,7 @@ void log_msg(const char *msg) {
     if (f) {
         time_t now = time(NULL);
         struct tm *t = localtime(&now);
-        fprintf(f, "[%04d-%02d-%02d %02d:%02d:%02d] %s
-",
+        fprintf(f, "[%04d-%02d-%02d %02d:%02d:%02d] %s\n",
                 t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
                 t->tm_hour, t->tm_min, t->tm_sec, msg);
         fclose(f);
@@ -138,7 +137,7 @@ static bool        g_net_up = false;
 static Result net_init(void) {
     Result rc;
 
-    /* Network interface manager — try System type for sysmodule context */
+    /* Network interface manager - try System type for sysmodule context */
     rc = nifmInitialize(NifmServiceType_System);
     if (R_FAILED(rc)) {
         rc = nifmInitialize(NifmServiceType_User);
@@ -148,7 +147,7 @@ static Result net_init(void) {
         return rc;
     }
 
-    /* Sockets — use System service type with explicit config */
+    /* Sockets - use System service type with explicit config */
     SocketInitConfig cfg = {
         .tcp_tx_buf_size = 0x4000,
         .tcp_rx_buf_size = 0x4000,
@@ -250,7 +249,7 @@ static void psc_thread_func(void *arg) {
                 break;
         }
 
-        /* MUST acknowledge — system waits for all modules before state change */
+        /* MUST acknowledge - system waits for all modules before state change */
         pscPmModuleAcknowledge(&g_psc_module, state);
     }
 }
@@ -269,7 +268,7 @@ static Result psc_monitor_init(void) {
 
     ueventCreate(&g_psc_exit_event, false);
 
-    /* Stack increased to 16KB — 4KB was too small */
+    /* Stack increased to 16KB - 4KB was too small */
     rc = threadCreate(&g_psc_thread, psc_thread_func, NULL,
                       NULL, 0x4000, 0x2C, -2);
     if (R_FAILED(rc)) {
@@ -304,7 +303,7 @@ static void psc_monitor_exit(void) {
 }
 
 /* ================================================================
- * Main service init — called once at startup
+ * Main service init - called once at startup
  * ================================================================ */
 static bool s_base_ready = false;
 
@@ -349,7 +348,7 @@ int main(int argc, char **argv) {
 
     /* At boot2, many services are not yet registered with SM.
      * Wait longer for the system to finish initializing services.
-     * Do NOT aggressively retry in a tight loop — this starves
+     * Do NOT aggressively retry in a tight loop - this starves
      * the scheduler and can destabilize other boot2 modules. */
     svcSleepThread(15000000000ULL);  /* 15 seconds */
 
@@ -386,7 +385,7 @@ int main(int argc, char **argv) {
         svcSleepThread(1000000000ULL);  /* 1 second */
         loop++;
 
-        /* If network isn't up yet (startup retry), try again every 30s */
+        /* If network is not up yet (startup retry), try again every 30s */
         if (!g_net_up && s_base_ready && (loop % 30 == 0)) {
             rc = net_init();
             if (R_SUCCEEDED(rc)) {
