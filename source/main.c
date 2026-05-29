@@ -1,10 +1,9 @@
-// pctltcp-sysmodule - Switch Parental Control Web Server (Sysmodule)
+// pctltcp-sysmodule - Switch Parental Control Web Server (boot2 sysmodule)
 // =================================================================
 // Background sysmodule: auto-starts at boot, runs forever.
 // HTTP server on port 8080 with embedded mobile Web UI.
-//
-// Build:  make -> pctltcp-sysmodule.sts
-// Install: sd:/atmosphere/sysmodules/pctltcp-sysmodule.sts
+// Build:  make -> pctltcp-sysmodule.nsp
+// Install: sd:/atmosphere/contents/0100000000000023/exefs.nsp
 // =================================================================
 
 #include <switch.h>
@@ -13,6 +12,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <time.h>
+#include <sys/stat.h>
 
 #include "pctl_handler.h"
 #include "http_server.h"
@@ -20,11 +20,6 @@
 // ---- Log file (no console in sysmodule) ---
 #define LOG_FILE "/switch/pctltcp-sysmodule/sysmodule.log"
 #define MAX_LOG_SIZE (100 * 1024)
-
-// ---- Sysmodule entry: userAppInit/Main/Exit (switch_sysmodule.specs) ---
-void userAppInit(void);
-void userAppMain(void);
-void userAppExit(void);
 
 // ---- Logging ---
 static void rotate_log_if_needed(void) {
@@ -70,6 +65,17 @@ static void ip_to_str(u32 ip, char *buf, size_t bufsize) {
              (int)((ip >> 24) & 0xFF));
 }
 
+// ---- App hooks (called automatically by switch.specs CRT0) ---
+void userAppInit(void) {
+    smInitialize();
+    setsysInitialize();
+}
+
+void userAppExit(void) {
+    setsysExit();
+    smExit();
+}
+
 // ---- Service init ---
 static Result init_services(void) {
     // Init pctl (best-effort, HTTP UI still works without it)
@@ -77,8 +83,8 @@ static Result init_services(void) {
     log_result("pctl_init", rc);
 
     // Init sockets with retry (network may not be up yet)
-    rc = MAKERESULT(Module_Libnx, 1);
-    for (int i = 0; i < 60 && R_FAILED(rc); i++) {
+    rc = -1;
+    for (int i = 0; i < 60; i++) {
         rc = socketInitializeDefault();
         if (R_SUCCEEDED(rc)) break;
         svcSleepThread(2000000000ULL); // 2s
@@ -90,12 +96,12 @@ static Result init_services(void) {
         return rc;
     }
 
-    // Init nifm (needed for IP address)
+    // Init nifm (needed for IP address query)
     rc = nifmInitialize(NifmServiceType_User);
     log_result("nifmInit", rc);
     // Non-fatal if this fails
 
-    return 0;
+    return 0; // success
 }
 
 static void exit_services(void) {
@@ -108,18 +114,16 @@ static void exit_services(void) {
     log_msg("Stopped.");
 }
 
-// ---- Sysmodule entry points ---
-void userAppInit(void) {
-    smInitialize();
-    setsysInitialize();
-}
+// ---- main() entry point (switch.specs / NSP boot2) ---
+int main(int argc, char **argv) {
+    // App hooks
+    userAppInit();
+    atexit(userAppExit);
 
-void userAppExit(void) {
-    setsysExit();
-    smExit();
-}
+    // Ensure log directory exists
+    mkdir("/switch", 0777);
+    mkdir("/switch/pctltcp-sysmodule", 0777);
 
-void userAppMain(void) {
     // Wait for system to be ready
     svcSleepThread(15000000000ULL); // 15s
 
@@ -129,7 +133,7 @@ void userAppMain(void) {
         if (R_SUCCEEDED(rc)) {
             SetSysFirmwareVersion fw;
             if (R_SUCCEEDED(setsysGetFirmwareVersion(&fw)))
-                hosversionSet(MAKEHOSVERSION(fw.major, fw.minor, fw.micro));
+                hosversionSet(HOSVERSION_MAKE(fw.major, fw.minor, fw.micro));
             setsysExit();
         }
     }
@@ -138,7 +142,7 @@ void userAppMain(void) {
     Result rc = init_services();
     if (R_FAILED(rc)) {
         log_msg("FATAL: init_services failed!");
-        return;
+        return 1;
     }
 
     // Start HTTP server (port 8080)
@@ -198,4 +202,5 @@ void userAppMain(void) {
 
     // Unreachable, but kept for completeness
     exit_services();
+    return 0;
 }
