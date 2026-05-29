@@ -21,6 +21,9 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 
+/* Forward declaration — defined in main.c */
+extern void log_msg(const char *fmt, ...);
+
 /* ------------------------------------------------------------------ */
 /* State                                                               */
 /* ------------------------------------------------------------------ */
