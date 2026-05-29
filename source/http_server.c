@@ -1,4 +1,4 @@
-/**
+﻿/**
  * http_server.c - Minimal HTTP server for Switch parental control
  *
  * REST API:
@@ -64,15 +64,10 @@ static int http_read_request(int fd, char *buf, int bufsize)
 /* ------------------------------------------------------------------ */
 /* API handlers                                                        */
 /* ------------------------------------------------------------------ */
-/* Clamp remaining to a sane value. When the timer is exhausted,
- * Switch may return a very large value (overflow-like). Treat
- * anything > 1440 min (24h) as "0 remaining". */
 static u32 clamp_remaining_min(u64 remaining_ns)
 {
     if (remaining_ns == 0)
         return 0;
-    /* If the raw nanoseconds value is larger than 24h, treat as 0
-     * (timer exhausted or invalid). 24h = 86400000000000 ns. */
     if (remaining_ns > 86400000000000ULL)
         return 0;
     return (u32)NS_TO_MINUTES(remaining_ns);
@@ -99,11 +94,6 @@ static void api_status(int fd)
     http_send(fd, "200 OK", "application/json", json);
 }
 
-/*
- * api_allow: user specifies how many MORE minutes to add on top of
- * the current daily limit. Formula: new_limit = current_limit + allow_min.
- * If allow_min == 0 => unlimited (disable limit).
- */
 static void api_allow(int fd, const char *body)
 {
     unsigned int allow_min = 0;
@@ -117,12 +107,8 @@ static void api_allow(int fd, const char *body)
     int today = pctl_get_today_day();
 
     if (allow_min == 0) {
-        /* 0 => remove limit (unlimited) */
         rc = pctl_set_day_limit_minutes(today, 0);
     } else {
-        /* Simple formula: new_limit = current_limit + allow_min
-         * The system will keep the already-played time internally,
-         * so remaining will adjust accordingly. */
         u32 daily_limit = 0;
         pctl_get_daily_limit_minutes(&daily_limit);
 
@@ -306,7 +292,14 @@ void http_server_start(void)
     }
 
     s_running = true;
-    pthread_create(&s_thread, NULL, http_thread_func, NULL);
+
+    /* Use explicit stack size for the HTTP server thread.
+     * Default pthread stack on Switch/newlib is often too small. */
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 0x10000);  /* 64KB */
+    pthread_create(&s_thread, &attr, http_thread_func, NULL);
+    pthread_attr_destroy(&attr);
 }
 
 void http_server_stop(void)
