@@ -2,9 +2,10 @@
 // Build: make -> pctltcp-sysmodule.nsp (with APP_JSON)
 // Install: sd:/atmosphere/contents/010000000000BD23/exefs.nsp + flags/boot2.flag
 //
+// v1.7: Proactive network detection (user suggestion).
+//       Check network BEFORE trying HTTP server.
+//       Offline -> stop. Online -> start. No more blind retry.
 // v1.6: Keep bsd:ux alive for process lifetime.
-//       socketInitialize() called ONCE at startup, socketExit() only at process exit.
-//       Eliminates 0x559 error permanently.
 
 #include <switch.h>
 #include <stdio.h>
@@ -146,10 +147,6 @@ static void ip_to_str(u32 ip, char *buf, size_t bufsize) {
 /* =============================================================== */
 
 /* ---- ONE-TIME bsd:ux init ---- */
-/* socketInitialize() can ONLY be called ONCE per process.
- * Calling it twice without socketExit() in between returns 0x559.
- * We call it once at startup and never touch it again
- * (until process exit). */
 static Result bsd_init_once(void) {
     if (g_bsd_initialized) return 0;
 
@@ -171,6 +168,14 @@ static Result bsd_init_once(void) {
     g_bsd_initialized = true;
     log_msg("bsd:ux initialized (one-time, process lifetime).");
     return 0;
+}
+
+/* ---- Check if network is actually usable ---- */
+/* Uses IP address check only — reliable across all libnx versions. */
+static bool net_is_online(void) {
+    u32 ip = 0;
+    Result rc = nifmGetCurrentIpAddress(&ip);
+    return (R_SUCCEEDED(rc) && ip != 0);
 }
 
 /* ---- Network init (NO socketInitialize!) ---- */
@@ -209,11 +214,11 @@ static Result net_init(void) {
 static void net_cleanup(void) {
     if (http_server_is_running()) {
         http_server_stop();
-        log_msg("HTTP server stopped.");
+        log_msg("HTTP server stopped (network lost).");
     }
     if (g_net_up) {
         nifmExit();
-        log_msg("nifm exited (bsd:ux kept alive).");
+        log_msg("nifm exited (network down, bsd:ux kept alive).");
     }
     g_net_up = false;
 }
@@ -259,7 +264,7 @@ static Result init_services(void) {
     mkdir("sdmc:/switch", 0777);
     mkdir("sdmc:/switch/pctltcp-sysmodule", 0777);
 
-    log_msg("pctltcp-sysmodule starting (v1.6)...");
+    log_msg("pctltcp-sysmodule starting (v1.7)...");
 
     Result tz_rc = pctl_load_timezone();
     if (R_FAILED(tz_rc)) {
@@ -292,6 +297,7 @@ static Result init_services(void) {
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
+    /* Wait a bit for system services to be ready */
     svcSleepThread(15000000000ULL);
 
     Result rc = init_services();
@@ -308,71 +314,75 @@ int main(int argc, char **argv) {
 
     /* Initial network init with retry */
     if (s_base_ready) {
-        for (int attempt = 0; attempt < 30; attempt++) {
-            rc = net_init();
-            if (R_SUCCEEDED(rc)) break;
-            svcSleepThread(5000000000ULL);
+        for (int attempt = 0; attempt < 60; attempt++) {
+            if (net_is_online()) {
+                rc = net_init();
+                if (R_SUCCEEDED(rc)) break;
+            }
+            svcSleepThread(5000000000ULL);  /* wait 5s between retries */
         }
         if (R_FAILED(rc)) {
-            log_msg("WARNING: Network init failed after 30 retries.");
+            log_msg("WARNING: Network not available at boot. Will wait for network.");
         }
     }
 
     log_msg("pctltcp-sysmodule initialization complete.");
 
-    /* ---- Main loop ---- */
+    /* ---- Main loop: proactive network detection ---- */
     u64 loop = 0;
     char last_ip[64] = {0};
     u64 last_ip_check = 0;
-    int nifm_fail_count = 0;
+    bool last_online = false;
 
     while (1) {
-        svcSleepThread(1000000000ULL);
+        svcSleepThread(1000000000ULL);  /* 1 second per loop */
         loop++;
 
-        if (g_net_up && (loop % 5 == 0)) {
-            if (!http_server_is_running()) {
-                log_msg("HTTP server down, reinitializing network...");
-                rc = net_reinit();
-                nifm_fail_count = 0;
-                if (R_FAILED(rc))
-                    log_msg("net_reinit failed, will retry on next cycle.");
-                continue;
+        /* Check network status every 5 seconds */
+        if (loop % 5 != 0) continue;
+
+        bool online = net_is_online();
+
+        if (!online) {
+            /* ---- Network is DOWN ---- */
+            if (g_net_up) {
+                /* Was up before, now lost -> stop everything */
+                log_msg("Network lost (sleep?). Stopping HTTP server.");
+                net_cleanup();
+                last_online = false;
             }
+            /* If already down, do nothing, just wait */
+            continue;
         }
 
-        if (g_net_up && (loop % 10 == 0)) {
-            u32 ipaddr = 0;
-            Result nifm_rc = nifmGetCurrentIpAddress(&ipaddr);
-            if (R_FAILED(nifm_rc)) {
-                nifm_fail_count++;
-                if (nifm_fail_count >= 3) {
-                    log_msg("nifm unresponsive (3 failures), reinitializing...");
-                    rc = net_reinit();
-                    nifm_fail_count = 0;
-                    if (R_FAILED(rc))
-                        log_msg("net_reinit failed, will retry on next cycle.");
-                    continue;
-                }
-            } else {
-                nifm_fail_count = 0;
-            }
+        /* ---- Network is UP ---- */
+        if (!last_online) {
+            /* Transition: offline -> online */
+            log_msg("Network restored (wake?). Starting HTTP server.");
         }
 
-        if (!g_net_up && s_base_ready && (loop % 30 == 0)) {
+        if (!g_net_up) {
+            /* Network is up but services not started -> start them */
             rc = net_init();
-            if (R_SUCCEEDED(rc)) {
-                log_msg("Network init succeeded on retry!");
+            if (R_FAILED(rc)) {
+                log_msg("net_init() failed after network restore, will retry.");
             }
+            last_online = true;
+            continue;
         }
 
-        if (g_net_up && (loop % 60 == 0) && !http_server_is_running()) {
-            log_msg("HTTP server down (periodic check), reinitializing...");
+        /* Network is up AND services are up -> check HTTP server health */
+        if (!http_server_is_running()) {
+            log_msg("HTTP server down (was running), reinitializing...");
             rc = net_reinit();
-            nifm_fail_count = 0;
+            if (R_FAILED(rc))
+                log_msg("net_reinit failed, will retry on next cycle.");
         }
 
-        if (g_net_up && (loop - last_ip_check >= 300)) {
+        last_online = true;
+
+        /* IP change detection every 60 seconds */
+        if (g_net_up && (loop - last_ip_check >= 60)) {
             char new_ip[64] = {0};
             u32 a = 0;
             if (R_SUCCEEDED(nifmGetCurrentIpAddress(&a)) && a != 0) {

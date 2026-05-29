@@ -1,4 +1,4 @@
-﻿/**
+/**
  * http_server.c - Minimal HTTP server for Switch parental control
  *
  * REST API:
@@ -7,7 +7,7 @@
  *   POST /api/allow     -> Add minutes to today's limit (additive)
  *                          body: minutes=N
  *                          calc: new_limit = current_limit + N
- *   Version: v1.3
+ *   Version: v1.7
  */
 #include "http_server.h"
 #include "pctl_handler.h"
@@ -20,12 +20,15 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <pthread.h>
+#include <fcntl.h>
 
 /* ------------------------------------------------------------------ */
 /* State                                                               */
 /* ------------------------------------------------------------------ */
-static int       s_server_fd = -1;
-static bool      s_running   = false;
+static int       s_server_fd  = -1;
+static int       s_wakeup_rd = -1;   /* self-pipe read end  */
+static int       s_wakeup_wr = -1;   /* self-pipe write end */
+static bool      s_running    = false;
 static pthread_t s_thread;
 
 /* ------------------------------------------------------------------ */
@@ -94,7 +97,7 @@ static void api_status(int fd)
     char json[256];
     static const char *day_names[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
     snprintf(json, sizeof(json),
-        "{\"daily_limit_min\":%u,\"remaining_min\":%u,\"played_min\":%u,\"today\":%d,\"today_name\":\"%s\",\"version\":\"v1.3\"}",
+        "{\"daily_limit_min\":%u,\"remaining_min\":%u,\"played_min\":%u,\"today\":%d,\"today_name\":\"%s\",\"version\":\"v1.7\"}",
         daily_limit, remaining_min, played_min, today, day_names[today]);
 
     http_send(fd, "200 OK", "application/json", json);
@@ -147,7 +150,7 @@ static const char *WEB_HTML =
 "<head>"
 "<meta charset='UTF-8'>"
 "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-"<title>Switch Timer v1.3</title>"
+"<title>Switch Timer v1.7</title>"
 "<style>"
 "body{font-family:sans-serif;background:#1a1a2e;color:#fff;text-align:center;padding:20px;margin:0}"
 ".box{background:rgba(255,255,255,0.1);border-radius:12px;padding:20px;margin:15px 0}"
@@ -164,7 +167,7 @@ static const char *WEB_HTML =
 "</style>"
 "</head>"
 "<body>"
-"<h2>Switch Parental Control <small>v1.3</small></h2>"
+"<h2>Switch Parental Control <small>v1.7</small></h2>"
 "<div class='box'>"
 "<div class='row'>"
 "<div class='tile'><div class='lbl'>Played</div><div class='big' id='played'>--</div></div>"
@@ -245,7 +248,7 @@ static void handle_request(int fd)
 }
 
 /* ------------------------------------------------------------------ */
-/* Server thread                                                       */
+/* Server thread — self-pipe wakes select() reliably              */
 /* ------------------------------------------------------------------ */
 static void *http_thread_func(void *arg)
 {
@@ -255,26 +258,30 @@ static void *http_thread_func(void *arg)
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(s_server_fd, &rfds);
-        struct timeval tv;
-        tv.tv_sec = 0;
-        tv.tv_usec = 500000;
+        FD_SET(s_wakeup_rd, &rfds);
+        int maxfd = (s_server_fd > s_wakeup_rd) ? s_server_fd : s_wakeup_rd;
 
-        int ret = select(s_server_fd + 1, &rfds, NULL, NULL, &tv);
+        struct timeval tv;
+        tv.tv_sec  = 1;
+        tv.tv_usec = 0;
+
+        int ret = select(maxfd + 1, &rfds, NULL, NULL, &tv);
         if (ret < 0) {
-            /* Socket error — likely broken after system sleep/wake.
-             * The WlanSockets module reinitializes on wake and invalidates
-             * old sockets. Exit the thread so the main loop can detect
-             * the failure and do a full network reinit. */
             s_running = false;
             break;
         }
-        if (ret == 0) continue;  /* Timeout, no incoming connection */
+        if (ret == 0) continue;  /* 1-second timeout */
+
+        /* wakeup pipe readable → exit gracefully */
+        if (FD_ISSET(s_wakeup_rd, &rfds)) {
+            char buf[16];
+            read(s_wakeup_rd, buf, sizeof(buf));
+            break;
+        }
 
         if (FD_ISSET(s_server_fd, &rfds)) {
             int client_fd = accept(s_server_fd, NULL, NULL);
             if (client_fd < 0) {
-                /* Accept error — socket might be broken after sleep/wake.
-                 * Same as select error: exit and let main loop reinit. */
                 s_running = false;
                 break;
             }
@@ -282,6 +289,7 @@ static void *http_thread_func(void *arg)
         }
     }
 
+    s_running = false;  /* ensure flag is false when thread exits */
     return NULL;
 }
 
@@ -292,9 +300,23 @@ static void *http_thread_func(void *arg)
 void http_server_start(void)
 {
     struct sockaddr_in addr;
+    int pipefd[2];
+
+    /* Create self-pipe so stop() can reliably unblock select().
+     * Closing a socket from another thread does NOT guarantee
+     * select() will return on Switch's BSD socket layer. */
+    if (pipe(pipefd) < 0) {
+        return;
+    }
+    s_wakeup_rd = pipefd[0];
+    s_wakeup_wr = pipefd[1];
+
+    /* Make read end non-blocking so draining it won't block */
+    int flags = fcntl(s_wakeup_rd, F_GETFL, 0);
+    fcntl(s_wakeup_rd, F_SETFL, flags | O_NONBLOCK);
 
     s_server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (s_server_fd < 0) return;
+    if (s_server_fd < 0) goto fail;
 
     int optval = 1;
     setsockopt(s_server_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
@@ -307,37 +329,56 @@ void http_server_start(void)
     if (bind(s_server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         close(s_server_fd);
         s_server_fd = -1;
-        return;
+        goto fail;
     }
 
     if (listen(s_server_fd, 4) < 0) {
         close(s_server_fd);
         s_server_fd = -1;
-        return;
+        goto fail;
     }
 
     s_running = true;
 
-    /* Use explicit stack size for the HTTP server thread.
-     * Default pthread stack on Switch/newlib is often too small. */
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, 0x10000);  /* 64KB */
     pthread_create(&s_thread, &attr, http_thread_func, NULL);
     pthread_attr_destroy(&attr);
+    return;
+
+fail:
+    if (s_wakeup_rd >= 0) { close(s_wakeup_rd); s_wakeup_rd = -1; }
+    if (s_wakeup_wr >= 0) { close(s_wakeup_wr); s_wakeup_wr = -1; }
 }
 
 void http_server_stop(void)
 {
+    if (!s_running && s_server_fd < 0 && s_wakeup_rd < 0) return;
+
     s_running = false;
 
+    /* Wake up select() by writing to the self-pipe.
+     * This guarantees the thread will see the pipe readable and exit,
+     * so pthread_join() below will NOT deadlock. */
+    if (s_wakeup_wr >= 0) {
+        char c = 'W';
+        write(s_wakeup_wr, &c, 1);
+    }
+
+    /* Also close the server socket to unblock accept() if thread is there */
     if (s_server_fd >= 0) {
         shutdown(s_server_fd, SHUT_RDWR);
         close(s_server_fd);
         s_server_fd = -1;
     }
 
+    /* Now pthread_join() will NOT deadlock */
     pthread_join(s_thread, NULL);
+
+    /* Clean up pipe fds */
+    if (s_wakeup_rd >= 0) { close(s_wakeup_rd); s_wakeup_rd = -1; }
+    if (s_wakeup_wr >= 0) { close(s_wakeup_wr); s_wakeup_wr = -1; }
 }
 
 bool http_server_is_running(void)
