@@ -1,6 +1,6 @@
-// pctltcp-sysmodule - Switch Parental Control Web Server (sysmodule)
-// Build: make -> pctltcp-sysmodule.sts
-// Install: sd:/atmosphere/sysmodules/pctltcp-sysmodule.sts
+// pctltcp-sysmodule - Switch Parental Control Web Server (boot2 sysmodule)
+// Build: make -> pctltcp-sysmodule.nsp
+// Install: sd:/atmosphere/contents/<TID>/exefs.nsp + flags/boot2.flag
 
 #include <switch.h>
 #include <stdio.h>
@@ -15,10 +15,6 @@
 
 #define LOG_FILE "/switch/pctltcp-sysmodule/sysmodule.log"
 #define MAX_LOG_SIZE (100 * 1024)
-
-/* ---- App hooks (called by switch_sysmodule.specs CRT0) ---- */
-void userAppInit(void);
-void userAppExit(void);
 
 /* ---- Logging ---- */
 static void rotate_log_if_needed(void) {
@@ -90,13 +86,8 @@ static Result init_services(void) {
     return rc;
 }
 
-/* ---- App hooks ---- */
-void userAppInit(void) {
-    smInitialize();
-    setsysInitialize();
-}
-
-void userAppExit(void) {
+/* ---- Service exit ---- */
+static void exit_services(void) {
     if (http_server_is_running())
         http_server_stop();
     if (pctl_is_initialized())
@@ -107,21 +98,35 @@ void userAppExit(void) {
     smExit();
 }
 
-/* ---- sysmodule entry point (switch_sysmodule.specs -> userAppMain) ---- */
-void userAppMain(void) {
-    /* App hooks are called automatically by CRT0 */
-    /* userAppInit() is called before this function */
+/* ---- sysmodule entry point ----
+ * Built with switch.specs (application CRT0) -> int main()
+ * Installed as boot2 sysmodule via exefs.nsp + boot2.flag
+ */
+int main(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
 
+    /* Init system services */
+    Result rc = smInitialize();
+    if (R_FAILED(rc)) return 1;
+
+    rc = setsysInitialize();
+    if (R_FAILED(rc)) { smExit(); return 1; }
+
+    /* Create log directory */
     mkdir("/switch", 0777);
     mkdir("/switch/pctltcp-sysmodule", 0777);
+
+    log_msg("pctltcp-sysmodule starting...");
 
     /* Wait for system to be ready */
     svcSleepThread(15000000000ULL);
 
-    Result rc = init_services();
+    rc = init_services();
     if (R_FAILED(rc)) {
         log_msg("FATAL: init_services failed!");
-        return;
+        exit_services();
+        return 1;
     }
 
     http_server_start();
@@ -177,4 +182,8 @@ void userAppMain(void) {
             last_ip_check = loop;
         }
     }
+
+    /* Unreachable, but keeps compiler happy */
+    exit_services();
+    return 0;
 }

@@ -1,12 +1,17 @@
 #---------------------------------------------------------------------------------
-# Makefile for switch-pctltcp-sysmodule (sysmodule)
-# Install: sd:/atmosphere/sysmodules/pctltcp-sysmodule.sts
-# Build:   make -> pctltcp-sysmodule.sts
+# Makefile for switch-pctltcp-sysmodule (boot2 sysmodule)
+# Install: sd:/atmosphere/contents/<TID>/exefs.nsp + flags/boot2.flag
+# Build:   make -> pctltcp-sysmodule.nsp
 #---------------------------------------------------------------------------------
 
 ifeq ($(strip $(DEVKITPRO)),)
 $(error "Please set DEVKITPRO in your environment. export DEVKITPRO=<path to>/devkitpro")
 endif
+
+# Use switch.specs (application CRT0 -> int main).
+# Do NOT set APPLET_TYPE; the default (application) uses switch.specs,
+# which exists in all devkitPro versions.
+# Boot2 sysmodule = normal ELF packaged as NSP, launched by Atmosphere at boot.
 
 TOPDIR ?= $(CURDIR)
 include $(DEVKITPRO)/libnx/switch_rules
@@ -20,7 +25,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 TARGET		:= pctltcp-sysmodule
 BUILD		:= build
-SOURCES	:= source
+SOURCES		:= source
 DATA		:= data
 INCLUDES	:= include
 
@@ -38,7 +43,9 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 
 ASFLAGS		:= -g $(ARCH)
 
-LDFLAGS	= -specs=$(DEVKITPRO)/libnx/switch_sysmodule.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+# Do NOT override LDFLAGS; switch_rules handles it correctly.
+# Overriding LDFLAGS with a hardcoded specs file causes
+# "cannot read spec file" errors in some devkitPro versions.
 
 LIBS		:= -lnx
 
@@ -46,13 +53,14 @@ LIBS		:= -lnx
 # list of directories containing libraries, this must be the top level containing
 # include and lib
 #---------------------------------------------------------------------------------
-LIBDIRS	:= $(PORTLIBS) $(LIBNX)
+LIBDIRS		:= $(PORTLIBS) $(LIBNX)
 
 #---------------------------------------------------------------------------------
 # no real need to edit anything past this point unless you need to add additional
 # rules for different file extensions
 #---------------------------------------------------------------------------------
 ifneq ($(BUILD),$(notdir $(CURDIR)))
+
 #---------------------------------------------------------------------------------
 
 export OUTPUT	:= $(CURDIR)/$(TARGET)
@@ -98,21 +106,22 @@ $(BUILD):
 
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).nro $(TARGET).sts
+	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).nro $(TARGET).nsp
 
 #---------------------------------------------------------------------------------
 else
+
 .PHONY:	all
 
 DEPENDS	:= $(OBJFILES:.o=.d)
 
 #---------------------------------------------------------------------------------
-# main targets — build .sts (sysmodule) instead of .nro
+# main target — build .nsp (boot2 sysmodule)
 #---------------------------------------------------------------------------------
-all	:	$(OUTPUT).sts
+all	:	$(OUTPUT).nsp
 
-# Sysmodule target (self-contained executable)
-$(OUTPUT).sts	:	$(OUTPUT).elf
+# NSP target (boot2 sysmodule)
+$(OUTPUT).nsp	:	$(OUTPUT).elf
 	@echo built ... $(notdir $@)
 	@$(NOFDEFAULTS) $< $@
 
