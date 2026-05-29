@@ -291,6 +291,7 @@ Result http_server_start(void)
     struct sockaddr_in addr;
     int optval = 1;
 
+    s_server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (s_server_fd < 0) {
         return MAKERESULT(Module_Custom, 1);
     }
