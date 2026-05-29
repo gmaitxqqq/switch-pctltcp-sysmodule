@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     container:
-      image: devkitpro/devkita64:latest
+      image: devkitpro/devkitpro:latest
 
     steps:
       - name: Checkout
@@ -24,12 +24,12 @@ jobs:
           make clean
           make -j$(nproc)
           echo "=== Output files ==="
-          ls -la *.sts *.elf 2>/dev/null || true
+          ls -la *.nsp *.elf 2>/dev/null || true
 
       - name: List output
         run: |
-          echo "=== All .sts files ==="
-          find . -name "*.sts" -ls 2>/dev/null || echo "No .sts files found"
+          echo "=== All .nsp files ==="
+          find . -name "*.nsp" -ls 2>/dev/null || echo "No .nsp files found"
           echo "=== Build dir ==="
           ls -la build/ 2>/dev/null || true
 
@@ -37,5 +37,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pctltcp-sysmodule
-          path: pctltcp-sysmodule.sts
+          path: pctltcp-sysmodule.nsp
           if-no-files-found: error
