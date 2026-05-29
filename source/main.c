@@ -193,6 +193,28 @@ static Result net_init(void) {
         return rc;
     }
 
+    /* Wait for IP to become available (WiFi may still be connecting).
+     * nifmInitialize() succeeds immediately, but IP is assigned asynchronously.
+     * Without this wait, net_is_online() will immediately return false
+     * and the main loop will tear down the network we just set up.
+     * Timeout: 30 seconds max. */
+    log_msg("Waiting for IP address...");
+    u32 ipaddr = 0;
+    int waited = 0;
+    while (waited < 30) {
+        rc = nifmGetCurrentIpAddress(&ipaddr);
+        if (R_SUCCEEDED(rc) && ipaddr != 0)
+            break;
+        svcSleepThread(1000000000ULL); /* 1 second */
+        waited++;
+    }
+    if (ipaddr == 0) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "WARNING: IP still 0 after %d s (rc=0x%08X)", waited, (unsigned)rc);
+        log_msg(buf);
+        /* Continue anyway — HTTP server binds INADDR_ANY, will work once IP arrives */
+    }
+
     http_server_start();
     if (!http_server_is_running()) {
         log_msg("HTTP server start FAILED.");
@@ -204,12 +226,13 @@ static Result net_init(void) {
     log_msg("Network services initialized, HTTP server started.");
 
     char ip[64] = {0};
-    u32 ipaddr = 0;
-    if (R_SUCCEEDED(nifmGetCurrentIpAddress(&ipaddr)) && ipaddr != 0) {
+    if (ipaddr != 0) {
         ip_to_str(ipaddr, ip, sizeof(ip));
         char msg[256];
         snprintf(msg, sizeof(msg), "Web UI: http://%s:%d", ip, HTTP_PORT);
         log_msg(msg);
+    } else {
+        log_msg("Web UI: http://<IP not yet assigned>:" STRINGIZE(HTTP_PORT));
     }
     return 0;
 }
