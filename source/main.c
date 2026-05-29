@@ -1,10 +1,6 @@
 // pctltcp-sysmodule - Switch Parental Control Web Server (boot2 sysmodule)
-// =================================================================
-// Background sysmodule: auto-starts at boot, runs forever.
-// HTTP server on port 8080 with embedded mobile Web UI.
-// Build:  make -> pctltcp-sysmodule.nsp
+// Build: make -> pctltcp-sysmodule.nsp
 // Install: sd:/atmosphere/contents/0100000000000023/exefs.nsp
-// =================================================================
 
 #include <switch.h>
 #include <stdio.h>
@@ -17,11 +13,14 @@
 #include "pctl_handler.h"
 #include "http_server.h"
 
-// ---- Log file (no console in sysmodule) ---
 #define LOG_FILE "/switch/pctltcp-sysmodule/sysmodule.log"
 #define MAX_LOG_SIZE (100 * 1024)
 
-// ---- Logging ---
+/* ---- App hooks (called by switch.specs CRT0) ---- */
+void userAppInit(void);
+void userAppExit(void);
+
+/* ---- Logging ---- */
 static void rotate_log_if_needed(void) {
     FILE *f = fopen(LOG_FILE, "r");
     if (f) {
@@ -56,7 +55,7 @@ static void log_result(const char *ctx, Result rc) {
     log_msg(buf);
 }
 
-// ---- IP to string (libnx has no inet_ntoa) ---
+/* ---- IP to string ---- */
 static void ip_to_str(u32 ip, char *buf, size_t bufsize) {
     snprintf(buf, bufsize, "%d.%d.%d.%d",
              (int)((ip >>  0) & 0xFF),
@@ -65,7 +64,31 @@ static void ip_to_str(u32 ip, char *buf, size_t bufsize) {
              (int)((ip >> 24) & 0xFF));
 }
 
-// ---- App hooks (called automatically by switch.specs CRT0) ---
+/* ---- Service init ---- */
+static Result init_services(void) {
+    Result rc = pctl_init();
+    log_result("pctl_init", rc);
+
+    rc = -1;
+    for (int i = 0; i < 60; i++) {
+        rc = socketInitializeDefault();
+        if (R_SUCCEEDED(rc)) break;
+        svcSleepThread(2000000000ULL);
+    }
+    log_result("socketInit", rc);
+    if (R_FAILED(rc)) {
+        if (pctl_is_initialized())
+            pctl_exit();
+        return rc;
+    }
+
+    rc = nifmInitialize(NifmServiceType_User);
+    log_result("nifmInit", rc);
+
+    return 0;
+}
+
+/* ---- App hooks ---- */
 void userAppInit(void) {
     smInitialize();
     setsysInitialize();
@@ -76,58 +99,17 @@ void userAppExit(void) {
     smExit();
 }
 
-// ---- Service init ---
-static Result init_services(void) {
-    // Init pctl (best-effort, HTTP UI still works without it)
-    Result rc = pctl_init();
-    log_result("pctl_init", rc);
+/* ---- sysmodule entry point (switch_sysmodule.specs) ---- */
+void userAppMain(void) {
+    (void)argc;
+    (void)argv;
 
-    // Init sockets with retry (network may not be up yet)
-    rc = -1;
-    for (int i = 0; i < 60; i++) {
-        rc = socketInitializeDefault();
-        if (R_SUCCEEDED(rc)) break;
-        svcSleepThread(2000000000ULL); // 2s
-    }
-    log_result("socketInit", rc);
-    if (R_FAILED(rc)) {
-        if (pctl_is_initialized())
-            pctl_exit();
-        return rc;
-    }
-
-    // Init nifm (needed for IP address query)
-    rc = nifmInitialize(NifmServiceType_User);
-    log_result("nifmInit", rc);
-    // Non-fatal if this fails
-
-    return 0; // success
-}
-
-static void exit_services(void) {
-    log_msg("Shutting down...");
-    http_server_stop();
-    nifmExit();
-    socketExit();
-    if (pctl_is_initialized())
-        pctl_exit();
-    log_msg("Stopped.");
-}
-
-// ---- main() entry point (switch.specs / NSP boot2) ---
-int main(int argc, char **argv) {
-    // App hooks
-    userAppInit();
-    atexit(userAppExit);
-
-    // Ensure log directory exists
     mkdir("/switch", 0777);
     mkdir("/switch/pctltcp-sysmodule", 0777);
 
-    // Wait for system to be ready
-    svcSleepThread(15000000000ULL); // 15s
+    svcSleepThread(15000000000ULL);
 
-    // Get firmware version
+    /* Get firmware version */
     {
         Result rc = setsysInitialize();
         if (R_SUCCEEDED(rc)) {
@@ -138,18 +120,15 @@ int main(int argc, char **argv) {
         }
     }
 
-    // Init services
     Result rc = init_services();
     if (R_FAILED(rc)) {
         log_msg("FATAL: init_services failed!");
         return 1;
     }
 
-    // Start HTTP server (port 8080)
     http_server_start();
     log_msg(http_server_is_running() ? "HTTP server started." : "HTTP server start FAILED.");
 
-    // Log IP
     char ip[64] = {0};
     u32 ipaddr = 0;
     if (R_SUCCEEDED(nifmGetCurrentIpAddress(&ipaddr)) && ipaddr != 0) {
@@ -161,23 +140,21 @@ int main(int argc, char **argv) {
         log_msg(msg);
     }
 
-    // Main loop: run forever, health check every 30s
+    /* Main loop */
     u64 loop = 0;
     char last_ip[64] = {0};
     u64 last_ip_check = 0;
 
     while (1) {
-        svcSleepThread(1000000000ULL); // 1s
+        svcSleepThread(1000000000ULL);
         loop++;
 
-        // Health check every 30s
         if ((loop % 30 == 0) && !http_server_is_running()) {
             log_msg("WARNING: HTTP server down, restarting...");
             http_server_start();
             log_msg("HTTP server restarted.");
         }
 
-        // Re-check IP every 5 min
         if (loop - last_ip_check >= 300) {
             char new_ip[64] = {0};
             u32 a = 0;
@@ -200,7 +177,5 @@ int main(int argc, char **argv) {
         }
     }
 
-    // Unreachable, but kept for completeness
-    exit_services();
     return 0;
 }

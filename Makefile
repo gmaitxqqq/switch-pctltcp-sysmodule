@@ -19,9 +19,9 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 TARGET		:= pctltcp-sysmodule
 
-# boot2 sysmodule settings (NOT applet_type 4!)
-APPLET_TYPE	:=
-NODEFAULTFW	:=
+# boot2 sysmodule: use switch_sysmodule.specs + userAppMain()
+APPLET_TYPE	:= 4
+NODEFAULTFW	:= 1
 
 BUILD		:= build
 SOURCES		:= source
@@ -45,7 +45,7 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 
 ASFLAGS		:= -g $(ARCH)
 
-LDFLAGS	= -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+LDFLAGS	= -specs=$(DEVKITPRO)/libnx/switch_sysmodule.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
 LIBS		:= -lnx
 
