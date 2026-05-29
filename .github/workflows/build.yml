@@ -19,23 +19,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build ELF
+      - name: Build
         run: |
           make clean
           make -j$(nproc)
 
-      - name: Convert ELF to NSP
+      - name: Package sysmodule
         run: |
-          python3 elf2nsp.py pctltcp-sysmodule.elf pctltcp-sysmodule.nsp
-
-      - name: List output
-        run: |
-          echo "=== Output files ==="
-          ls -la *.nsp *.elf 2>/dev/null || true
+          mkdir -p release/atmosphere/contents/0100000000001000/exefs
+          mkdir -p release/atmosphere/contents/0100000000001000/flags
+          cp pctltcp-sysmodule.elf release/atmosphere/contents/0100000000001000/exefs/main
+          touch release/atmosphere/contents/0100000000001000/flags/boot2.flag
+          echo "=== Output ==="
+          ls -laR release/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: pctltcp-sysmodule
-          path: pctltcp-sysmodule.nsp
+          path: release/
           if-no-files-found: error
