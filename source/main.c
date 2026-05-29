@@ -2,10 +2,9 @@
 // Build: make -> pctltcp-sysmodule.nsp (with APP_JSON)
 // Install: sd:/atmosphere/contents/010000000000BD23/exefs.nsp + flags/boot2.flag
 //
-// v1.7: Proactive network detection (user suggestion).
-//       Check network BEFORE trying HTTP server.
-//       Offline -> stop. Online -> start. No more blind retry.
-// v1.6: Keep bsd:ux alive for process lifetime.
+// v1.7b: Fix boot hang — don't call nifmGetCurrentIpAddress() before nifmInitialize().
+//       Restructure main loop: try net_init() directly at boot,
+//       use net_is_online() only AFTER nifm is initialized.
 
 #include <switch.h>
 #include <stdio.h>
@@ -28,10 +27,10 @@ static bool g_bsd_initialized = false;
 
 #define INNER_HEAP_SIZE 0x80000
 
-u32 __nx_applet_type = AppletType_None;
-u32 __nx_fs_num_sessions = 2;
+u32  __nx_applet_type = AppletType_None;
+u32  __nx_fs_num_sessions = 2;
 
-void __libnx_initheap(void) {
+void  __libnx_initheap(void) {
     static u8 inner_heap[INNER_HEAP_SIZE];
     extern void *fake_heap_start;
     extern void *fake_heap_end;
@@ -69,8 +68,12 @@ Result __appInit(void) {
 void __appExit(void) {
     if (g_net_up) {
         http_server_stop();
-        socketExit();
         nifmExit();
+        socketExit();
+    } else {
+        /* nifm was never initialized, but bsd:ux might be up */
+        if (g_bsd_initialized)
+            socketExit();
     }
     fsdevUnmountAll();
     fsExit();
@@ -171,8 +174,9 @@ static Result bsd_init_once(void) {
 }
 
 /* ---- Check if network is actually usable ---- */
-/* Uses IP address check only — reliable across all libnx versions. */
+/* MUST only be called AFTER nifmInitialize() has succeeded (g_net_up == true). */
 static bool net_is_online(void) {
+    if (!g_net_up) return false;   /* nifm not initialized yet */
     u32 ip = 0;
     Result rc = nifmGetCurrentIpAddress(&ip);
     return (R_SUCCEEDED(rc) && ip != 0);
@@ -264,7 +268,7 @@ static Result init_services(void) {
     mkdir("sdmc:/switch", 0777);
     mkdir("sdmc:/switch/pctltcp-sysmodule", 0777);
 
-    log_msg("pctltcp-sysmodule starting (v1.7)...");
+    log_msg("pctltcp-sysmodule starting (v1.7b)...");
 
     Result tz_rc = pctl_load_timezone();
     if (R_FAILED(tz_rc)) {
@@ -312,17 +316,19 @@ int main(int argc, char **argv) {
         while (1) svcSleepThread(1000000000ULL);
     }
 
-    /* Initial network init with retry */
+    /* Initial network init with retry.
+     * Do NOT call net_is_online() here — nifm is not initialized yet!
+     * Just try net_init() directly and retry if network isn't ready. */
     if (s_base_ready) {
+        log_msg("Waiting for network to become available...");
         for (int attempt = 0; attempt < 60; attempt++) {
-            if (net_is_online()) {
-                rc = net_init();
-                if (R_SUCCEEDED(rc)) break;
-            }
-            svcSleepThread(5000000000ULL);  /* wait 5s between retries */
+            rc = net_init();
+            if (R_SUCCEEDED(rc)) break;
+            /* Wait 5 seconds before retry */
+            svcSleepThread(5000000000ULL);
         }
         if (R_FAILED(rc)) {
-            log_msg("WARNING: Network not available at boot. Will wait for network.");
+            log_msg("WARNING: Network not available at boot. Will wait for network in main loop.");
         }
     }
 
@@ -332,15 +338,15 @@ int main(int argc, char **argv) {
     u64 loop = 0;
     char last_ip[64] = {0};
     u64 last_ip_check = 0;
-    bool last_online = false;
 
     while (1) {
         svcSleepThread(1000000000ULL);  /* 1 second per loop */
         loop++;
 
-        /* Check network status every 5 seconds */
+        /* Only check network every 5 seconds */
         if (loop % 5 != 0) continue;
 
+        /* net_is_online() is safe to call now (g_net_up is accurate) */
         bool online = net_is_online();
 
         if (!online) {
@@ -349,25 +355,19 @@ int main(int argc, char **argv) {
                 /* Was up before, now lost -> stop everything */
                 log_msg("Network lost (sleep?). Stopping HTTP server.");
                 net_cleanup();
-                last_online = false;
             }
             /* If already down, do nothing, just wait */
             continue;
         }
 
         /* ---- Network is UP ---- */
-        if (!last_online) {
-            /* Transition: offline -> online */
-            log_msg("Network restored (wake?). Starting HTTP server.");
-        }
-
         if (!g_net_up) {
-            /* Network is up but services not started -> start them */
+            /* Transition: offline -> online, or first init after boot */
+            log_msg("Network restored (wake?). Starting HTTP server.");
             rc = net_init();
             if (R_FAILED(rc)) {
                 log_msg("net_init() failed after network restore, will retry.");
             }
-            last_online = true;
             continue;
         }
 
@@ -378,8 +378,6 @@ int main(int argc, char **argv) {
             if (R_FAILED(rc))
                 log_msg("net_reinit failed, will retry on next cycle.");
         }
-
-        last_online = true;
 
         /* IP change detection every 60 seconds */
         if (g_net_up && (loop - last_ip_check >= 60)) {
