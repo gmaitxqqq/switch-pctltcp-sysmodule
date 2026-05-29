@@ -2,9 +2,10 @@
 // Build: make -> pctltcp-sysmodule.nsp (with APP_JSON)
 // Install: sd:/atmosphere/contents/010000000000BD23/exefs.nsp + flags/boot2.flag
 //
-// v1.4: Removed PSC power monitor (caused system freeze on wake).
-//       Now uses main-loop health check to detect broken networking
-//       (e.g., after sleep/wake) and automatically reinitializes.
+// v1.5: Fix socketInitialize 0x559 error after long sleep.
+//       bsd:ux service needs time to release resources after socketExit().
+//       Added cooldown delays in net_cleanup() and net_reinit().
+//       Added socketInitialize failure cooldown to prevent rapid retry.
 
 #include <switch.h>
 #include <stdio.h>
@@ -196,6 +197,11 @@ static Result net_init(void) {
     if (R_FAILED(rc)) {
         log_result("socketInitialize", rc);
         nifmExit();
+        /* CRITICAL: Cool down before returning to prevent rapid retry.
+         * If socketInitialize fails with 0x559, bsd:ux is still holding
+         * the resource. A short delay gives it time to release. */
+        log_msg("socketInitialize failed, cooling down before retry...");
+        svcSleepThread(5000000000ULL);  /* 5 seconds */
         return rc;
     }
 
@@ -237,13 +243,20 @@ static void net_cleanup(void) {
         log_msg("Network services cleaned up.");
     }
     g_net_up = false;
+
+    /* CRITICAL: Give bsd:ux service time to fully release socket resources. */
+    log_msg("net_cleanup: waiting 5s for bsd:ux to release resources...");
+    svcSleepThread(5000000000ULL);  /* 5 seconds */
 }
 
 /* ---- Full network reinit (cleanup + init) ---- */
 static Result net_reinit(void) {
     net_cleanup();
-    /* Small delay to let system services stabilize */
-    svcSleepThread(3000000000ULL);  /* 3 seconds */
+    /* Longer delay to let system services fully stabilize,
+     * especially after sleep/wake where WlanSockets may still be
+     * reinitializing. Also gives bsd:ux time to fully release. */
+    log_msg("net_reinit: waiting 8s before reinitializing network...");
+    svcSleepThread(8000000000ULL);  /* 8 seconds (was 3) */
     return net_init();
 }
 
@@ -257,7 +270,7 @@ static Result init_services(void) {
     mkdir("sdmc:/switch", 0777);
     mkdir("sdmc:/switch/pctltcp-sysmodule", 0777);
 
-    log_msg("pctltcp-sysmodule starting (v1.4 - no PSC)...");
+    log_msg("pctltcp-sysmodule starting (v1.5)...");
 
     /* Load timezone rule for correct day-of-week calculation.
      * This MUST be called after timeInitialize() (which is in __appInit).
@@ -354,8 +367,11 @@ int main(int argc, char **argv) {
         if (g_net_up && (loop % 5 == 0)) {
             if (!http_server_is_running()) {
                 log_msg("HTTP server down, reinitializing network...");
-                net_reinit();
+                rc = net_reinit();
                 nifm_fail_count = 0;
+                if (R_FAILED(rc)) {
+                    log_msg("net_reinit failed, will retry on next cycle");
+                }
                 continue;
             }
         }
@@ -372,8 +388,11 @@ int main(int argc, char **argv) {
                 nifm_fail_count++;
                 if (nifm_fail_count >= 3) {
                     log_msg("nifm unresponsive (3 failures), reinitializing...");
-                    net_reinit();
+                    rc = net_reinit();
                     nifm_fail_count = 0;
+                    if (R_FAILED(rc)) {
+                        log_msg("net_reinit failed, will retry on next cycle");
+                    }
                     continue;
                 }
             } else {
