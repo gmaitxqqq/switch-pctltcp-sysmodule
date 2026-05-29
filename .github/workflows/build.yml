@@ -19,17 +19,37 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build
+      - name: Build ELF
         run: |
           make clean
           make -j$(nproc)
 
+      - name: Generate NPDM and package NSP
+        run: |
+          # Generate NPDM from JSON config
+          python3 tools/mknpdm.py pctltcp-sysmodule.npdm.json main.npdm
+
+          # Package ELF + NPDM as NSP (PFS0 container)
+          python3 tools/mknsp.py exefs.nsp pctltcp-sysmodule.elf main.npdm
+
+          echo "=== Build artifacts ==="
+          ls -la pctltcp-sysmodule.elf main.npdm exefs.nsp
+
       - name: Package sysmodule
         run: |
-          mkdir -p release/atmosphere/contents/0100000000001000/exefs
-          mkdir -p release/atmosphere/contents/0100000000001000/flags
-          cp pctltcp-sysmodule.elf release/atmosphere/contents/0100000000001000/exefs/main
-          touch release/atmosphere/contents/0100000000001000/flags/boot2.flag
+          TID="0100000000000023"
+          mkdir -p release/atmosphere/contents/${TID}
+          mkdir -p release/atmosphere/contents/${TID}/flags
+
+          # Copy NSP as exefs.nsp (contains main ELF + main.npdm)
+          cp exefs.nsp release/atmosphere/contents/${TID}/exefs.nsp
+
+          # Create boot2 flag for auto-start
+          touch release/atmosphere/contents/${TID}/flags/boot2.flag
+
+          # Copy toolbox.json for Homebrew Toolbox
+          cp toolbox.json release/atmosphere/contents/${TID}/toolbox.json
+
           echo "=== Output ==="
           ls -laR release/
 
