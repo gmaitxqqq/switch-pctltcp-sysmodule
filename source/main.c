@@ -153,9 +153,16 @@ static Result net_init(void) {
      * Never call socketExit() until process exit (__appExit).
      */
     if (!g_bsd_initialized) {
-        rc = socketInitializeDefault();
+        int retry = 0;
+        while (retry < 10) {
+            rc = socketInitializeDefault();
+            if (R_SUCCEEDED(rc)) break;
+            log_msg("socketInitializeDefault failed: 0x%X (retry %d/10)", rc, retry+1);
+            svcSleepThread(2000000000ULL);  /* wait 2 seconds */
+            retry++;
+        }
         if (R_FAILED(rc)) {
-            log_msg("socketInitializeDefault failed: 0x%X", rc);
+            log_msg("socketInitializeDefault failed after 10 retries, giving up.");
             return rc;
         }
         g_bsd_initialized = true;
@@ -250,34 +257,37 @@ int main(int argc, char **argv) {
 
     log_msg("pctltcp-sysmodule initialization complete.");
 
-    /* Main loop: proactively monitor network status */
+    /* Main loop: retry on boot + monitor sleep/wake */
     while (1) {
-        svcSleepThread(1000000000ULL);  /* sleep 1 second */
+        svcSleepThread(1000000000ULL);
 
-        bool online = net_is_online();
-
-        if (!online) {
-                if (g_net_up) {
-                    log_msg("Network lost (sleep?). Stopping HTTP server.");
-                    net_cleanup();
-                    log_msg("nifm exited (network down, bsd:ux kept alive).");
-                }
-            } else {
-                if (!g_net_up) {
-                    log_msg("Network restored, starting HTTP server.");
-                    net_init();
-                    if (g_net_up) {
-                        u32 ip = 0;
-                        nifmGetCurrentIpAddress(&ip);
-                        char ipstr[64];
-                        snprintf(ipstr, sizeof(ipstr), "Web UI: http://%d.%d.%d.%d:%d",
-                                (ip >> 0) & 0xFF, (ip >> 8) & 0xFF,
-                                (ip >> 16) & 0xFF, (ip >> 24) & 0xFF,
-                                HTTP_PORT);
-                        log_msg("%s", ipstr);
-                    }
+        /* Network not yet up: keep retrying until it comes up */
+        if (!g_net_up) {
+            static int retry_count = 0;
+            if (++retry_count >= 3) {
+                retry_count = 0;
+                log_msg("Retrying network init...");
+                Result retry_rc = net_init();
+                if (R_SUCCEEDED(retry_rc)) {
+                    u32 retry_ip = 0;
+                    nifmGetCurrentIpAddress(&retry_ip);
+                    char ipstr[64];
+                    snprintf(ipstr, sizeof(ipstr), "Web UI: http://%d.%d.%d.%d:%d",
+                            (retry_ip >> 0) & 0xFF, (retry_ip >> 8) & 0xFF,
+                            (retry_ip >> 16) & 0xFF, (retry_ip >> 24) & 0xFF,
+                            HTTP_PORT);
+                    log_msg("Network init succeeded: %s", ipstr);
                 }
             }
+            continue;  /* skip online check while network is still down */
+        }
+
+        /* Network is up: detect sleep/wake transitions */
+        bool online = net_is_online();
+        if (!online) {
+            log_msg("Network lost (sleep?). Stopping HTTP server.");
+            net_cleanup();
+        }
     }
 
     /* Unreachable, but keep compiler happy */
