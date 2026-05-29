@@ -163,7 +163,7 @@ static Result net_init(void) {
     }
 
     /* Initialize nifm service */
-    rc = nifmInitialize(NIFM_SERVICE_TYPE_USER);
+    rc = nifmInitialize(NifmServiceType_User);
     if (R_FAILED(rc)) {
         log_msg("nifmInitialize failed: 0x%X", rc);
         return rc;
@@ -231,12 +231,12 @@ int main(int argc, char **argv) {
 
     /* Time service */
     time_t now = time(NULL);
-    log_msg("Time service: OK (time=%ld, rc=0x%lX)", now, 0);
+    log_msg("Time service: OK (time=%ld, rc=0x%X)", now, 0);
 
     /* Initialize network and HTTP server */
     Result rc = net_init();
     if (R_FAILED(rc)) {
-        log_msg("Initial network init failed (rc=0x%lX), will retry in main loop.", rc);
+        log_msg("Initial network init failed (rc=0x%X), will retry in main loop.", rc);
     } else {
         u32 ip = 0;
         nifmGetCurrentIpAddress(&ip);
