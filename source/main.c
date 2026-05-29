@@ -1,10 +1,10 @@
 // pctltcp-sysmodule - Switch Parental Control Web Server (Sysmodule)
-// =============================================================
+// =================================================================
 // Background sysmodule: auto-starts at boot, runs forever.
 // HTTP server on port 8080 with embedded mobile Web UI.
 //
 // Install: sd:/atmosphere/contents/0100000000000023/exefs.nsp
-// =============================================================
+// =================================================================
 
 #include <switch.h>
 #include <stdio.h>
@@ -12,7 +12,6 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <time.h>
-#include <arpa/inet.h>
 
 #include "pctl_handler.h"
 #include "http_server.h"
@@ -67,6 +66,15 @@ static void log_result(const char *ctx, Result rc) {
     log_msg(buf);
 }
 
+// ---- IP to string (libnx has no inet_ntoa) ----
+static void ip_to_str(u32 ip, char *buf, size_t bufsize) {
+    snprintf(buf, bufsize, "%d.%d.%d.%d",
+             (int)((ip >>  0) & 0xFF),
+             (int)((ip >>  8) & 0xFF),
+             (int)((ip >> 16) & 0xFF),
+             (int)((ip >> 24) & 0xFF));
+}
+
 // ---- Service init ----
 static Result init_services(void) {
     // Init pctl (best-effort, HTTP UI still works without it)
@@ -74,7 +82,7 @@ static Result init_services(void) {
     log_result("pctl_init", rc);
 
     // Init sockets with retry (network may not be up yet)
-    rc = MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
+    rc = MAKERESULT(Module_Libnx, 1);
     for (int i = 0; i < 60 && R_FAILED(rc); i++) {
         rc = socketInitializeDefault();
         if (R_SUCCEEDED(rc)) break;
@@ -82,7 +90,8 @@ static Result init_services(void) {
     }
     log_result("socketInit", rc);
     if (R_FAILED(rc)) {
-        if (pctl_is_initialized()) pctl_exit();
+        if (pctlIsInitialized())
+            pctlExit();
         return rc;
     }
 
@@ -99,8 +108,8 @@ static void exit_services(void) {
     http_server_stop();
     nifmExit();
     socketExit();
-    if (pctl_is_initialized())
-        pctl_exit();
+    if (pctlIsInitialized())
+        pctlExit();
     log_msg("Stopped.");
 }
 
@@ -139,32 +148,29 @@ int main(void) {
 
     // Start HTTP server (port 8080)
     http_server_start();
-    log_result("http_server_start",
-               http_server_is_running() ? 0 : MAKERESULT(Module_Libnx, LibnxError_NotInitialized));
+    log_msg(http_server_is_running() ? "HTTP server started." : "HTTP server start FAILED.");
 
     // Log IP
     char ip[64] = {0};
     u32 ipaddr = 0;
     if (R_SUCCEEDED(nifmGetCurrentIpAddress(&ipaddr)) && ipaddr != 0) {
-        struct in_addr a;
-        a.s_addr = ipaddr;
-        snprintf(ip, sizeof(ip), "%s", inet_ntoa(a));
+        ip_to_str(ipaddr, ip, sizeof(ip));
     }
     char msg[256];
     snprintf(msg, sizeof(msg), "HTTP server running on http://%s:%d", ip, HTTP_PORT);
     log_msg(msg);
 
     // Main loop: run forever, health check every 30s
-    uint64_t loop = 0;
+    u64 loop = 0;
     char last_ip[64] = {0};
-    uint64_t last_ip_check = 0;
+    u64 last_ip_check = 0;
 
     while (1) {
         svcSleepThread(1000000000ULL); // 1s
         loop++;
 
         // Health check every 30s
-        if (loop % 30 == 0 && !http_server_is_running()) {
+        if ((loop % 30 == 0) && !http_server_is_running()) {
             log_msg("WARNING: HTTP server down, restarting...");
             http_server_start();
             log_msg("HTTP server restarted.");
@@ -175,9 +181,7 @@ int main(void) {
             char new_ip[64] = {0};
             u32 a = 0;
             if (R_SUCCEEDED(nifmGetCurrentIpAddress(&a)) && a != 0) {
-                struct in_addr ia;
-                ia.s_addr = a;
-                snprintf(new_ip, sizeof(new_ip), "%s", inet_ntoa(ia));
+                ip_to_str(a, new_ip, sizeof(new_ip));
             }
             if (strcmp(last_ip, new_ip) != 0) {
                 char m[256];
