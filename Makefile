@@ -2,16 +2,17 @@
 # Makefile for switch-pctltcp-sysmodule (boot2 sysmodule)
 # Install: sd:/atmosphere/contents/<TID>/exefs.nsp + flags/boot2.flag
 # Build:   make -> pctltcp-sysmodule.nsp
+# Entry point: int main(int argc, char **argv)  (switch.specs CRT0)
 #---------------------------------------------------------------------------------
 
 ifeq ($(strip $(DEVKITPRO)),)
 $(error "Please set DEVKITPRO in your environment. export DEVKITPRO=<path to>/devkitpro")
 endif
 
-# Use switch.specs (application CRT0 -> int main).
-# Do NOT set APPLET_TYPE; the default (application) uses switch.specs,
-# which exists in all devkitPro versions.
-# Boot2 sysmodule = normal ELF packaged as NSP, launched by Atmosphere at boot.
+# ---- CRITICAL: set BEFORE include switch_rules ----
+# Force application CRT0 (switch.specs exists in ALL devkitPro versions).
+# Do NOT use sysmodule CRT0 (switch_sysmodule.specs may not exist).
+APPLET_TYPE := application
 
 TOPDIR ?= $(CURDIR)
 include $(DEVKITPRO)/libnx/switch_rules
@@ -25,7 +26,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 TARGET		:= pctltcp-sysmodule
 BUILD		:= build
-SOURCES		:= source
+SOURCES	:= source
 DATA		:= data
 INCLUDES	:= include
 
@@ -43,9 +44,9 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 
 ASFLAGS		:= -g $(ARCH)
 
-# Do NOT override LDFLAGS; switch_rules handles it correctly.
+# Do NOT override LDFLAGS; switch_rules handles it based on APPLET_TYPE.
 # Overriding LDFLAGS with a hardcoded specs file causes
-# "cannot read spec file" errors in some devkitPro versions.
+# "cannot read spec file" errors.
 
 LIBS		:= -lnx
 
@@ -60,7 +61,6 @@ LIBDIRS		:= $(PORTLIBS) $(LIBNX)
 # rules for different file extensions
 #---------------------------------------------------------------------------------
 ifneq ($(BUILD),$(notdir $(CURDIR)))
-
 #---------------------------------------------------------------------------------
 
 export OUTPUT	:= $(CURDIR)/$(TARGET)
@@ -120,7 +120,7 @@ DEPENDS	:= $(OBJFILES:.o=.d)
 #---------------------------------------------------------------------------------
 all	:	$(OUTPUT).nsp
 
-# NSP target (boot2 sysmodule)
+# NSP target (boot2 sysmodule — ordinary ELF wrapped in NSP)
 $(OUTPUT).nsp	:	$(OUTPUT).elf
 	@echo built ... $(notdir $@)
 	@$(NOFDEFAULTS) $< $@
