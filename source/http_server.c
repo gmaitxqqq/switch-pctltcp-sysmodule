@@ -25,10 +25,8 @@
 /* ------------------------------------------------------------------ */
 /* State                                                               */
 /* ------------------------------------------------------------------ */
-static int       s_server_fd  = -1;
-static int       s_wakeup_rd = -1;   /* self-pipe read end  */
-static int       s_wakeup_wr = -1;   /* self-pipe write end */
-static bool      s_running    = false;
+static int       s_server_fd = -1;
+static bool      s_running   = false;
 static pthread_t s_thread;
 
 /* ------------------------------------------------------------------ */
@@ -248,7 +246,7 @@ static void handle_request(int fd)
 }
 
 /* ------------------------------------------------------------------ */
-/* Server thread — self-pipe wakes select() reliably              */
+/* Server thread — select() with 1-sec timeout, no self-pipe needed  */
 /* ------------------------------------------------------------------ */
 static void *http_thread_func(void *arg)
 {
@@ -258,31 +256,22 @@ static void *http_thread_func(void *arg)
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(s_server_fd, &rfds);
-        FD_SET(s_wakeup_rd, &rfds);
-        int maxfd = (s_server_fd > s_wakeup_rd) ? s_server_fd : s_wakeup_rd;
 
         struct timeval tv;
-        tv.tv_sec  = 1;
+        tv.tv_sec  = 1;   /* 1-second timeout -> thread wakes up every 1s */
         tv.tv_usec = 0;
 
-        int ret = select(maxfd + 1, &rfds, NULL, NULL, &tv);
+        int ret = select(s_server_fd + 1, &rfds, NULL, NULL, &tv);
         if (ret < 0) {
-            s_running = false;
+            /* select() error -> exit thread */
             break;
         }
-        if (ret == 0) continue;  /* 1-second timeout */
-
-        /* wakeup pipe readable → exit gracefully */
-        if (FD_ISSET(s_wakeup_rd, &rfds)) {
-            char buf[16];
-            read(s_wakeup_rd, buf, sizeof(buf));
-            break;
-        }
+        if (ret == 0) continue;  /* timeout, re-check s_running */
 
         if (FD_ISSET(s_server_fd, &rfds)) {
             int client_fd = accept(s_server_fd, NULL, NULL);
             if (client_fd < 0) {
-                s_running = false;
+                /* accept error -> socket might be closed, exit thread */
                 break;
             }
             handle_request(client_fd);
@@ -300,23 +289,9 @@ static void *http_thread_func(void *arg)
 void http_server_start(void)
 {
     struct sockaddr_in addr;
-    int pipefd[2];
-
-    /* Create self-pipe so stop() can reliably unblock select().
-     * Closing a socket from another thread does NOT guarantee
-     * select() will return on Switch's BSD socket layer. */
-    if (pipe(pipefd) < 0) {
-        return;
-    }
-    s_wakeup_rd = pipefd[0];
-    s_wakeup_wr = pipefd[1];
-
-    /* Make read end non-blocking so draining it won't block */
-    int flags = fcntl(s_wakeup_rd, F_GETFL, 0);
-    fcntl(s_wakeup_rd, F_SETFL, flags | O_NONBLOCK);
 
     s_server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (s_server_fd < 0) goto fail;
+    if (s_server_fd < 0) return;
 
     int optval = 1;
     setsockopt(s_server_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
@@ -329,13 +304,13 @@ void http_server_start(void)
     if (bind(s_server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         close(s_server_fd);
         s_server_fd = -1;
-        goto fail;
+        return;
     }
 
     if (listen(s_server_fd, 4) < 0) {
         close(s_server_fd);
         s_server_fd = -1;
-        goto fail;
+        return;
     }
 
     s_running = true;
@@ -345,40 +320,27 @@ void http_server_start(void)
     pthread_attr_setstacksize(&attr, 0x10000);  /* 64KB */
     pthread_create(&s_thread, &attr, http_thread_func, NULL);
     pthread_attr_destroy(&attr);
-    return;
-
-fail:
-    if (s_wakeup_rd >= 0) { close(s_wakeup_rd); s_wakeup_rd = -1; }
-    if (s_wakeup_wr >= 0) { close(s_wakeup_wr); s_wakeup_wr = -1; }
 }
 
 void http_server_stop(void)
 {
-    if (!s_running && s_server_fd < 0 && s_wakeup_rd < 0) return;
+    if (!s_running && s_server_fd < 0) return;
 
+    /* Signal the thread to exit */
     s_running = false;
 
-    /* Wake up select() by writing to the self-pipe.
-     * This guarantees the thread will see the pipe readable and exit,
-     * so pthread_join() below will NOT deadlock. */
-    if (s_wakeup_wr >= 0) {
-        char c = 'W';
-        write(s_wakeup_wr, &c, 1);
-    }
-
-    /* Also close the server socket to unblock accept() if thread is there */
+    /* Close the server socket to unblock accept() / select().
+     * On Switch, closing from another thread may not immediately
+     * wake select(), but the 1-sec timeout in http_thread_func()
+     * guarantees the thread will notice s_running=false within 1 sec. */
     if (s_server_fd >= 0) {
         shutdown(s_server_fd, SHUT_RDWR);
         close(s_server_fd);
         s_server_fd = -1;
     }
 
-    /* Now pthread_join() will NOT deadlock */
+    /* Wait for the thread to exit (at most ~1 second due to select timeout) */
     pthread_join(s_thread, NULL);
-
-    /* Clean up pipe fds */
-    if (s_wakeup_rd >= 0) { close(s_wakeup_rd); s_wakeup_rd = -1; }
-    if (s_wakeup_wr >= 0) { close(s_wakeup_wr); s_wakeup_wr = -1; }
 }
 
 bool http_server_is_running(void)
