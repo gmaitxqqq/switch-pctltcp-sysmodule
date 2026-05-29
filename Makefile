@@ -1,5 +1,6 @@
 #---------------------------------------------------------------------------------
-# .SUFFIXES:
+# Makefile for switch-pctltcp-sysmodule (boot2 sysmodule)
+# Installs to: sd:/atmosphere/contents/0100000000000023/exefs.nsp
 #---------------------------------------------------------------------------------
 
 ifeq ($(strip $(DEVKITPRO)),)
@@ -18,9 +19,9 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 TARGET		:= pctltcp-sysmodule
 
-# Sysmodule settings
-APPLET_TYPE	:= 4
-NOSHAREDFW	:= true
+# boot2 sysmodule settings (NOT applet_type 4!)
+APPLET_TYPE	:=
+NODEFAULTFW	:=
 
 BUILD		:= build
 SOURCES		:= source
@@ -33,18 +34,18 @@ CONFIG_JSON	:= pctltcp-sysmodule.json
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
-ARCH		:= -march=armv8-a -mtune=cortex-a57 -mtp=soft -fpie
+ARCH		:= -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIE
 
 CFLAGS		:= -g -Wall -O2 -ffunction-sections \
-			$(ARCH) $(DEFINES)
+		   $(ARCH) $(DEFINES)
 
-CFLAGS		+= $(INCLUDE) -D__SWITCH__ -DVERSION_S=\"1.0.0\"
+CFLAGS		+= $(INCLUDE) -D__SWITCH__ -DVERSION=\"1.0.0\"
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 
 ASFLAGS		:= -g $(ARCH)
 
-LDFLAGS	= -specs=$(DEVKITPRO)/libnx/switch_sysmodule.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+LDFLAGS	= -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
 LIBS		:= -lnx
 
@@ -65,7 +66,7 @@ export OUTPUT	:= $(CURDIR)/$(TARGET)
 export TOPDIR	:= $(CURDIR)
 
 export VPATH	:= $(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) \
-			$(foreach dir,$(DATA),$(CURDIR)/$(dir))
+		   $(foreach dir,$(DATA),$(CURDIR)/$(dir))
 
 export DEPSSDIR	:= $(CURDIR)/$(BUILD)
 
@@ -85,12 +86,12 @@ endif
 
 export OBJFILES_BIN	:= $(addsuffix .o,$(BINFILES))
 export OBJFILES_SRC	:= $(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
-export OBJFILES	:= $(OBJFILES_BIN) $(OBJFILES_SRC)
+export OBJFILES		:= $(OBJFILES_BIN) $(OBJFILES_SRC)
 export HFILES_BIN	:= $(addsuffix .h,$(subst .,_,$(BINFILES)))
 
 export INCLUDE	:= $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
-			$(foreach dir,$(LIBDIRS),-I$(dir)/include) \
-			-I$(CURDIR)/$(BUILD)
+		   $(foreach dir,$(LIBDIRS),-I$(dir)/include) \
+		   -I$(CURDIR)/$(BUILD)
 
 export LIBPATHS	:= $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
@@ -112,12 +113,12 @@ endif
 all: $(BUILD)
 
 $(BUILD):
-	@[-d $@] || mkdir -p $@
+	@mkdir -p $@
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).sts
+	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).nsp $(TARGET).sts
 
 #---------------------------------------------------------------------------------
 else
@@ -126,11 +127,12 @@ else
 DEPS		:= $(OBJFILES:.o=.d)
 
 #---------------------------------------------------------------------------------
-# main targets - build .sts (sysmodule format)
+# main targets - build .nsp for boot2 sysmodule
 #---------------------------------------------------------------------------------
-all	:	$(OUTPUT).sts
+all	:	$(OUTPUT).nsp
 
-$(OUTPUT).sts	:	$(OUTPUT).elf
+# .nsp target: ELF -> NSP (for boot2 / atmosphere/contents/)
+$(OUTPUT).nsp	:	$(OUTPUT).elf
 	@echo building ... $(notdir $@)
 	@$(NOFDEFAULTS) $< $@
 
