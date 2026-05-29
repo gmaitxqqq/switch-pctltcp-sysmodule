@@ -282,34 +282,42 @@ Result pctl_set_daily_limit_minutes(u32 minutes)
 
 /**
  * Get today's day-of-week in Switch convention: 0=Sun, 1=Mon, ..., 6=Sat.
- * Uses Switch native timeGetCurrentTime() for reliability in sysmodule context.
- * Without timeInitialize(), C time() may return epoch 0 which is
- * Thursday 1970-01-01 (tm_wday=4), causing all operations to target
- * the wrong day. timeGetCurrentTime() talks directly to the time:u
- * service and is always correct.
- * Falls back to C time()/localtime(), then 0 (Sun).
+ *
+ * Uses timeToCalendarTimeWithMyRule() which converts UTC timestamp to
+ * local calendar time using the system's timezone rule via the Switch
+ * time:u service. This is the ONLY reliable way to get the correct
+ * day-of-week in sysmodule context, because:
+ *   - time(NULL) may return epoch 0 without timeInitialize()
+ *   - localtime() has no timezone info in sysmodule context
+ *   - gmtime() gives UTC day (wrong for UTC+ users)
+ *
+ * Falls back to C localtime(), then returns 0 (Sun).
  */
 int pctl_get_today_day(void)
 {
-    /* Primary: use Switch native time service (most reliable in sysmodule) */
+    /* Primary: Switch native time service with timezone conversion.
+     * timeToCalendarTimeWithMyRule() handles timezone internally,
+     * returning the correct local calendar time including wday. */
     u64 now_posix = 0;
-    Result rc = timeGetCurrentTime(TimeType_LocalSystemClock, &now_posix);
-    if (R_SUCCEEDED(rc) && now_posix > 946684800ULL) {  /* after 2000-01-01 sanity check */
-        time_t t = (time_t)now_posix;
-        struct tm *tm_info = localtime(&t);
-        if (tm_info)
-            return tm_info->tm_wday;  /* 0=Sun..6=Sat, matches Switch convention */
+    Result rc = timeGetCurrentTime(TimeType_UserSystemClock, &now_posix);
+    if (R_SUCCEEDED(rc) && now_posix > 946684800ULL) {
+        TimeCalendarTime cal;
+        TimeCalendarAdditionalInfo additional;
+        rc = timeToCalendarTimeWithMyRule(now_posix, &cal, &additional);
+        if (R_SUCCEEDED(rc)) {
+            return (int)additional.wday;  /* 0=Sun..6=Sat */
+        }
     }
 
-    /* Fallback: C standard library (works after timeInitialize()) */
-    time_t t2 = time(NULL);
-    if (t2 != (time_t)-1 && t2 > 946684800ULL) {
-        struct tm *tm_info = localtime(&t2);
+    /* Fallback: C standard library (may have wrong timezone in sysmodule) */
+    time_t t = time(NULL);
+    if (t != (time_t)-1 && t > 946684800ULL) {
+        struct tm *tm_info = localtime(&t);
         if (tm_info)
             return tm_info->tm_wday;
     }
 
-    /* Last resort: return Sunday (safe default) */
+    /* Last resort */
     return 0;
 }
 

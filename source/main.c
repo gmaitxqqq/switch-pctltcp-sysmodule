@@ -106,11 +106,21 @@ void log_msg(const char *msg) {
     rotate_log_if_needed();
     FILE *f = fopen(LOG_FILE, "a");
     if (f) {
-        time_t now = time(NULL);
-        struct tm *t = localtime(&now);
-        fprintf(f, "[%04d-%02d-%02d %02d:%02d:%02d] %s\n",
-                t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
-                t->tm_hour, t->tm_min, t->tm_sec, msg);
+        /* Use Switch native time for correct timestamps in sysmodule */
+        u64 now_posix = 0;
+        if (R_SUCCEEDED(timeGetCurrentTime(TimeType_UserSystemClock, &now_posix)) && now_posix > 946684800ULL) {
+            TimeCalendarTime cal;
+            TimeCalendarAdditionalInfo additional;
+            if (R_SUCCEEDED(timeToCalendarTimeWithMyRule(now_posix, &cal, &additional))) {
+                fprintf(f, "[%04d-%02d-%02d %02d:%02d:%02d] %s\n",
+                        cal.year, cal.month, cal.day,
+                        cal.hour, cal.minute, cal.second, msg);
+                fclose(f);
+                return;
+            }
+        }
+        /* Fallback: use raw epoch or simple format */
+        fprintf(f, "[?] %s\n", msg);
         fclose(f);
     }
 }
@@ -142,6 +152,10 @@ static bool        g_psc_active = false;
 
 /* Are our network services (socket + HTTP) currently up? */
 static bool        g_net_up = false;
+
+/* Flag: PSC wake event received, main loop should reinit network.
+ * This MUST be set by PSC thread and cleared by main loop. */
+static volatile bool g_pending_wake_reinit = false;
 
 /* ---- Network service init/cleanup ---- */
 static Result net_init(void) {
@@ -238,29 +252,34 @@ static void psc_thread_func(void *arg) {
         switch (state) {
             case PscPmState_Awake:             /* 0 - system fully awake */
             case PscPmState_ReadyAwaken:       /* 1 - waking up from sleep */
-                log_msg("PSC: Wake up detected, re-initializing network...");
-                net_cleanup();
-                /* Small delay to let network interface come up */
-                svcSleepThread(2000000000ULL);  /* 2 seconds */
-                net_init();
+                /* CRITICAL: Acknowledge IMMEDIATELY on wake!
+                 * The system blocks all wake-up completion until every
+                 * PSC module acknowledges. If we do net_init() here
+                 * (which calls nifmInitialize, socketInitialize, etc.),
+                 * the system deadlocks because those services haven't
+                 * finished waking up yet. Instead, set a flag and let
+                 * the main loop handle reinit after a safe delay. */
+                pscPmModuleAcknowledge(&g_psc_module, state);
+                g_pending_wake_reinit = true;
                 break;
 
             case PscPmState_ReadySleep:        /* 2 - preparing to sleep */
-                log_msg("PSC: Sleep requested, cleaning up network...");
+                /* For sleep: clean up first, THEN acknowledge.
+                 * Network cleanup is fast and must complete before
+                 * the system enters sleep. */
                 net_cleanup();
+                pscPmModuleAcknowledge(&g_psc_module, state);
                 break;
 
             case PscPmState_ReadyShutdown:     /* 5 - preparing to shutdown */
-                log_msg("PSC: Shutdown requested, cleaning up...");
                 net_cleanup();
+                pscPmModuleAcknowledge(&g_psc_module, state);
                 break;
 
             default:
+                pscPmModuleAcknowledge(&g_psc_module, state);
                 break;
         }
-
-        /* MUST acknowledge - system waits for all modules before state change */
-        pscPmModuleAcknowledge(&g_psc_module, state);
     }
 }
 
@@ -386,6 +405,18 @@ int main(int argc, char **argv) {
     while (1) {
         svcSleepThread(1000000000ULL);  /* 1 second */
         loop++;
+
+        /* Handle deferred wake reinit from PSC thread.
+         * Must be done here (not in PSC thread) because the system
+         * needs PSC acknowledge before services are fully awake. */
+        if (g_pending_wake_reinit) {
+            g_pending_wake_reinit = false;
+            /* Wait for system services to stabilize after wake */
+            svcSleepThread(5000000000ULL);  /* 5 seconds */
+            if (!g_net_up) {
+                net_init();
+            }
+        }
 
         /* If network is not up yet (startup retry), try again every 30s */
         if (!g_net_up && s_base_ready && (loop % 30 == 0)) {
