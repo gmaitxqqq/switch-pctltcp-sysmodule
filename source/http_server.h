@@ -15,6 +15,11 @@
 
 #define HTTP_PORT  8081
 
+/* Custom module ID for MAKERESULT */
+#ifndef Module_Custom
+#define Module_Custom 362  /* Arbitrary module ID */
+#endif
+
 Result http_server_start(void);
 void http_server_stop(void);
 bool http_server_is_running(void);
