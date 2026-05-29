@@ -291,31 +291,6 @@ static Result http_restart(void) {
         log_msg("HTTP server restart FAILED.");
         return -1;
     }
-
-    /* Verify: self-connection test */
-    {
-        struct sockaddr_in test_addr;
-        memset(&test_addr, 0, sizeof(test_addr));
-        test_addr.sin_family = AF_INET;
-        test_addr.sin_port = htons(HTTP_PORT);
-        test_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-
-        int test_fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (test_fd >= 0) {
-            struct timeval tv;
-            tv.tv_sec = 2;
-            tv.tv_usec = 0;
-            setsockopt(test_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-            if (connect(test_fd, (struct sockaddr *)&test_addr, sizeof(test_addr)) == 0) {
-                log_msg("HTTP self-test PASSED.");
-            } else {
-                log_msg("HTTP self-test FAILED - port not reachable!");
-            }
-            close(test_fd);
-        }
-    }
-
     log_msg("HTTP server restarted successfully.");
     return 0;
 }
