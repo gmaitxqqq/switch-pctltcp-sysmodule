@@ -260,12 +260,25 @@ static void *http_thread_func(void *arg)
         tv.tv_usec = 500000;
 
         int ret = select(s_server_fd + 1, &rfds, NULL, NULL, &tv);
-        if (ret <= 0) continue;
+        if (ret < 0) {
+            /* Socket error — likely broken after system sleep/wake.
+             * The WlanSockets module reinitializes on wake and invalidates
+             * old sockets. Exit the thread so the main loop can detect
+             * the failure and do a full network reinit. */
+            s_running = false;
+            break;
+        }
+        if (ret == 0) continue;  /* Timeout, no incoming connection */
 
         if (FD_ISSET(s_server_fd, &rfds)) {
             int client_fd = accept(s_server_fd, NULL, NULL);
-            if (client_fd >= 0)
-                handle_request(client_fd);
+            if (client_fd < 0) {
+                /* Accept error — socket might be broken after sleep/wake.
+                 * Same as select error: exit and let main loop reinit. */
+                s_running = false;
+                break;
+            }
+            handle_request(client_fd);
         }
     }
 

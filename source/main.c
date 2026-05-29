@@ -1,6 +1,10 @@
 // pctltcp-sysmodule - Switch Parental Control Web Server (boot2 sysmodule)
 // Build: make -> pctltcp-sysmodule.nsp (with APP_JSON)
 // Install: sd:/atmosphere/contents/010000000000BD23/exefs.nsp + flags/boot2.flag
+//
+// v1.4: Removed PSC power monitor (caused system freeze on wake).
+//       Now uses main-loop health check to detect broken networking
+//       (e.g., after sleep/wake) and automatically reinitializes.
 
 #include <switch.h>
 #include <stdio.h>
@@ -51,16 +55,18 @@ Result __appInit(void) {
         setsysExit();
     }
 
-    rc = pscmInitialize();
-    if (R_FAILED(rc)) return rc;
+    /* NOTE: Removed pscmInitialize() - we no longer use PSC monitoring.
+     * PSC with WlanSockets/Nifm dependencies caused the system to freeze
+     * on wake from sleep because the PSC scheduler deadlocked waiting
+     * for WlanSockets to reinitialize while our module still held stale
+     * IPC sessions. Instead, we detect broken networking via health
+     * checks in the main loop and reinitialize automatically. */
 
     rc = fsInitialize();
     if (R_FAILED(rc)) return rc;
 
-    /* Time service - REQUIRED for localtime()/time() to work correctly
-     * in sysmodule context. Without this, time(NULL) returns epoch 0
-     * (Thursday 1970-01-01), causing pctl_get_today_day() to always
-     * return 4 (Thursday) instead of the actual day. */
+    /* Time service - REQUIRED for correct day-of-week calculation.
+     * Without this, time(NULL) returns epoch 0 (Thursday 1970-01-01). */
     rc = timeInitialize();
     if (R_FAILED(rc)) {
         /* Non-fatal: pctl day-of-week may be wrong, but module can still run */
@@ -78,7 +84,6 @@ void __appExit(void) {
     fsdevUnmountAll();
     fsExit();
     timeExit();
-    pscmExit();
     smExit();  /* SM is kept alive for the entire process lifetime */
 }
 
@@ -120,10 +125,9 @@ void log_msg(const char *msg) {
             TimeCalendarTime cal;
             TimeCalendarAdditionalInfo additional;
 
-            /* Try WithMyRule first (auto timezone) */
             rc = timeToCalendarTimeWithMyRule(now_posix, &cal, &additional);
             if (R_FAILED(rc)) {
-                /* Try explicit timezone rule (loaded at startup) */
+                /* Try again - sometimes first call fails in sysmodule context */
                 rc = timeToCalendarTimeWithMyRule(now_posix, &cal, &additional);
             }
 
@@ -135,7 +139,7 @@ void log_msg(const char *msg) {
                 return;
             }
         }
-        /* Fallback: use raw epoch or simple format */
+        /* Fallback: no timestamp */
         fprintf(f, "[?] %s\n", msg);
         fclose(f);
     }
@@ -158,22 +162,12 @@ static void ip_to_str(u32 ip, char *buf, size_t bufsize) {
 }
 
 /* ================================================================
- * PSC Power State Monitor
+ * Network service management
  * ================================================================ */
 
-static PscPmModule g_psc_module;
-static Thread      g_psc_thread;
-static UEvent      g_psc_exit_event;
-static bool        g_psc_active = false;
+static bool g_net_up = false;
 
-/* Are our network services (socket + HTTP) currently up? */
-static bool        g_net_up = false;
-
-/* Flag: PSC wake event received, main loop should reinit network.
- * This MUST be set by PSC thread and cleared by main loop. */
-static volatile bool g_pending_wake_reinit = false;
-
-/* ---- Network service init/cleanup ---- */
+/* ---- Network init ---- */
 static Result net_init(void) {
     Result rc;
 
@@ -230,175 +224,27 @@ static Result net_init(void) {
     return 0;
 }
 
+/* ---- Network cleanup ---- */
 static void net_cleanup(void) {
-    if (!g_net_up) return;
-
     if (http_server_is_running()) {
         http_server_stop();
         log_msg("HTTP server stopped.");
     }
 
-    socketExit();
-    nifmExit();
-    g_net_up = false;
-    log_msg("Network services cleaned up.");
-}
-
-/* Light cleanup for PSC sleep — stop HTTP server only.
- * DO NOT exit nifm/socket service sessions during sleep!
- * Exiting them causes a deadlock: the PSC system tries to tell
- * WlanSockets/Nifm modules to sleep, but finds their service
- * sessions already closed, causing a system freeze.
- * Instead, just stop our HTTP server and close our socket.
- * The service sessions survive sleep/wake and remain valid. */
-static void net_sleep(void) {
-    if (!g_net_up) return;
-
-    if (http_server_is_running()) {
-        http_server_stop();
-        log_msg("HTTP server stopped for sleep.");
+    if (g_net_up) {
+        socketExit();
+        nifmExit();
+        log_msg("Network services cleaned up.");
     }
-    /* DO NOT call socketExit() or nifmExit() here! */
     g_net_up = false;
 }
 
-/* Light init for PSC wake — restart HTTP server only.
- * Service sessions (nifm, socket) should still be valid after wake.
- * If simple restart fails, fall back to full reinit. */
-static Result net_wake(void) {
-    if (g_net_up) return 0;
-
-    /* Try simple restart first — nifm/socket sessions should still be valid */
-    http_server_start();
-    if (http_server_is_running()) {
-        g_net_up = true;
-        log_msg("Network restored after wake (light init).");
-
-        /* Log IP address */
-        char ip[64] = {0};
-        u32 ipaddr = 0;
-        if (R_SUCCEEDED(nifmGetCurrentIpAddress(&ipaddr)) && ipaddr != 0) {
-            ip_to_str(ipaddr, ip, sizeof(ip));
-            char msg[256];
-            snprintf(msg, sizeof(msg), "Web UI: http://%s:%d", ip, HTTP_PORT);
-            log_msg(msg);
-        }
-        return 0;
-    }
-
-    /* Simple restart failed — socket might be invalid after wake.
-     * Fall back to full service reinit. */
-    log_msg("Light wake init failed, trying full reinit...");
-    socketExit();
-    nifmExit();
+/* ---- Full network reinit (cleanup + init) ---- */
+static Result net_reinit(void) {
+    net_cleanup();
+    /* Small delay to let system services stabilize */
+    svcSleepThread(3000000000ULL);  /* 3 seconds */
     return net_init();
-}
-
-/* ---- PSC thread ---- */
-static void psc_thread_func(void *arg) {
-    (void)arg;
-
-    Waiter psc_waiter  = waiterForEvent(&g_psc_module.event);
-    Waiter exit_waiter = waiterForUEvent(&g_psc_exit_event);
-
-    while (true) {
-        s32 idx = -1;
-        Result rc = waitMulti(&idx, UINT64_MAX, psc_waiter, exit_waiter);
-        if (R_FAILED(rc)) continue;
-
-        /* Exit signal */
-        if (idx == 1) break;
-
-        /* Get power state change request */
-        PscPmState state;
-        u32 flags;
-        rc = pscPmModuleGetRequest(&g_psc_module, &state, &flags);
-        if (R_FAILED(rc)) continue;
-
-        switch (state) {
-            case PscPmState_Awake:             /* 0 - system fully awake */
-            case PscPmState_ReadyAwaken:       /* 1 - waking up from sleep */
-                /* CRITICAL: Acknowledge IMMEDIATELY on wake!
-                 * The system blocks all wake-up completion until every
-                 * PSC module acknowledges. If we do net_init() here
-                 * (which calls nifmInitialize, socketInitialize, etc.),
-                 * the system deadlocks because those services haven't
-                 * finished waking up yet. Instead, set a flag and let
-                 * the main loop handle reinit after a safe delay. */
-                pscPmModuleAcknowledge(&g_psc_module, state);
-                g_pending_wake_reinit = true;
-                break;
-
-            case PscPmState_ReadySleep:        /* 2 - preparing to sleep */
-                /* CRITICAL: Use net_sleep() NOT net_cleanup()!
-                 * Calling socketExit()/nifmExit() here causes the
-                 * system to freeze on sleep because the PSC scheduler
-                 * needs WlanSockets/Nifm modules to complete their own
-                 * sleep transition, but we've already destroyed their
-                 * service sessions. Just stop our HTTP server and
-                 * acknowledge — the service sessions survive sleep. */
-                net_sleep();
-                pscPmModuleAcknowledge(&g_psc_module, state);
-                break;
-
-            case PscPmState_ReadyShutdown:     /* 5 - preparing to shutdown */
-                net_cleanup();
-                pscPmModuleAcknowledge(&g_psc_module, state);
-                break;
-
-            default:
-                pscPmModuleAcknowledge(&g_psc_module, state);
-                break;
-        }
-    }
-}
-
-/* ---- PSC init/exit ---- */
-static Result psc_monitor_init(void) {
-    Result rc;
-
-    u32 deps[] = { PscPmModuleId_WlanSockets, PscPmModuleId_Nifm };
-    rc = pscmGetPmModule(&g_psc_module, 0x7E,
-                          deps, sizeof(deps) / sizeof(u32), true);
-    if (R_FAILED(rc)) {
-        log_result("pscmGetPmModule", rc);
-        return rc;
-    }
-
-    ueventCreate(&g_psc_exit_event, false);
-
-    /* Stack increased to 16KB - 4KB was too small */
-    rc = threadCreate(&g_psc_thread, psc_thread_func, NULL,
-                      NULL, 0x4000, 0x2C, -2);
-    if (R_FAILED(rc)) {
-        log_result("threadCreate(psc)", rc);
-        pscPmModuleClose(&g_psc_module);
-        return rc;
-    }
-
-    rc = threadStart(&g_psc_thread);
-    if (R_FAILED(rc)) {
-        log_result("threadStart(psc)", rc);
-        threadClose(&g_psc_thread);
-        pscPmModuleClose(&g_psc_module);
-        return rc;
-    }
-
-    g_psc_active = true;
-    log_msg("PSC power monitor started.");
-    return 0;
-}
-
-static void psc_monitor_exit(void) {
-    if (!g_psc_active) return;
-
-    g_psc_active = false;
-    ueventSignal(&g_psc_exit_event);
-    pscPmModuleFinalize(&g_psc_module);
-    threadWaitForExit(&g_psc_thread);
-    threadClose(&g_psc_thread);
-    pscPmModuleClose(&g_psc_module);
-    log_msg("PSC power monitor stopped.");
 }
 
 /* ================================================================
@@ -407,13 +253,11 @@ static void psc_monitor_exit(void) {
 static bool s_base_ready = false;
 
 static Result init_services(void) {
-    Result rc;
-
     /* Create log directory */
     mkdir("sdmc:/switch", 0777);
     mkdir("sdmc:/switch/pctltcp-sysmodule", 0777);
 
-    log_msg("pctltcp-sysmodule starting...");
+    log_msg("pctltcp-sysmodule starting (v1.4 - no PSC)...");
 
     /* Load timezone rule for correct day-of-week calculation.
      * This MUST be called after timeInitialize() (which is in __appInit).
@@ -444,18 +288,8 @@ static Result init_services(void) {
         log_msg(buf);
     }
 
-    /* PSC power state monitor (non-fatal but very useful) */
-    rc = psc_monitor_init();
-    log_result("psc_monitor_init", rc);
-
     s_base_ready = true;
     return 0;
-}
-
-static void exit_services(void) {
-    net_cleanup();
-    psc_monitor_exit();
-    log_msg("pctltcp-sysmodule exiting.");
 }
 
 /* ================================================================
@@ -466,19 +300,16 @@ int main(int argc, char **argv) {
     (void)argv;
 
     /* At boot2, many services are not yet registered with SM.
-     * Wait longer for the system to finish initializing services.
-     * Do NOT aggressively retry in a tight loop - this starves
-     * the scheduler and can destabilize other boot2 modules. */
+     * Wait longer for the system to finish initializing services. */
     svcSleepThread(15000000000ULL);  /* 15 seconds */
 
-    /* Initialize services (pctl, PSC monitor) */
+    /* Initialize base services (time, timezone, etc.) */
     Result rc = init_services();
     if (R_FAILED(rc)) {
         log_msg("FATAL: Service initialization failed, entering idle loop.");
     }
 
-    /* Initialize network (socket, nifm, HTTP server) with sparse retry.
-     * Use long intervals to avoid flooding SM with session requests. */
+    /* Initialize network (socket, nifm, HTTP server) with sparse retry. */
     if (s_base_ready) {
         for (int attempt = 0; attempt < 30; attempt++) {
             rc = net_init();
@@ -493,31 +324,64 @@ int main(int argc, char **argv) {
     log_msg("pctltcp-sysmodule initialization complete.");
 
     /* ---- Main loop ----
-     * Keep the sysmodule alive forever.
-     * PSC thread handles sleep/wake automatically.
+     *
+     * No PSC monitoring - we use health checks instead.
+     *
+     * When the system goes to sleep, all threads are suspended.
+     * When it wakes up, threads resume but networking may be broken
+     * (WlanSockets reinitializes and invalidates old sockets).
+     *
+     * The HTTP server thread detects broken sockets via select()/accept()
+     * errors and exits cleanly. This main loop then detects the server
+     * is no longer running and does a full network reinit.
+     *
+     * Health check strategy:
+     * - Every 5 seconds: check if HTTP server is still running
+     * - Every 10 seconds: check if nifm is responsive
+     * - Every 30 seconds: retry network init if it's down
+     * - Every 5 minutes: check for IP address changes
      */
     u64 loop = 0;
     char last_ip[64] = {0};
     u64 last_ip_check = 0;
+    int nifm_fail_count = 0;  /* Consecutive nifm failures */
 
     while (1) {
         svcSleepThread(1000000000ULL);  /* 1 second */
         loop++;
 
-        /* Handle deferred wake reinit from PSC thread.
-         * Must be done here (not in PSC thread) because the system
-         * needs PSC acknowledge before services are fully awake. */
-        if (g_pending_wake_reinit) {
-            g_pending_wake_reinit = false;
-            /* Wait for system services to stabilize after wake.
-             * WiFi reconnection takes several seconds. */
-            svcSleepThread(5000000000ULL);  /* 5 seconds */
-            if (!g_net_up) {
-                net_wake();
+        /* ---- Health check: HTTP server running? ---- */
+        if (g_net_up && (loop % 5 == 0)) {
+            if (!http_server_is_running()) {
+                log_msg("HTTP server down, reinitializing network...");
+                net_reinit();
+                nifm_fail_count = 0;
+                continue;
             }
         }
 
-        /* If network is not up yet (startup retry), try again every 30s */
+        /* ---- Health check: nifm responsive? ----
+         * After sleep/wake, the network interface may be broken even
+         * though the HTTP server thread hasn't detected it yet.
+         * If nifmGetCurrentIpAddress() fails repeatedly, networking
+         * is broken and we need to reinit. */
+        if (g_net_up && (loop % 10 == 0)) {
+            u32 ipaddr = 0;
+            Result nifm_rc = nifmGetCurrentIpAddress(&ipaddr);
+            if (R_FAILED(nifm_rc)) {
+                nifm_fail_count++;
+                if (nifm_fail_count >= 3) {
+                    log_msg("nifm unresponsive (3 failures), reinitializing...");
+                    net_reinit();
+                    nifm_fail_count = 0;
+                    continue;
+                }
+            } else {
+                nifm_fail_count = 0;
+            }
+        }
+
+        /* ---- Startup retry: if network is not up yet ---- */
         if (!g_net_up && s_base_ready && (loop % 30 == 0)) {
             rc = net_init();
             if (R_SUCCEEDED(rc)) {
@@ -525,19 +389,14 @@ int main(int argc, char **argv) {
             }
         }
 
-        /* Restart HTTP server if it died (not due to sleep) */
+        /* ---- Periodic restart if HTTP died but net is still up ---- */
         if (g_net_up && (loop % 60 == 0) && !http_server_is_running()) {
-            log_msg("WARNING: HTTP server down (unexpected), restarting...");
-            http_server_start();
-            if (http_server_is_running()) {
-                log_msg("HTTP server restarted.");
-            } else {
-                log_msg("HTTP server restart failed, will retry full net_init...");
-                net_cleanup();
-            }
+            log_msg("HTTP server down (periodic check), reinitializing...");
+            net_reinit();
+            nifm_fail_count = 0;
         }
 
-        /* Check for IP change every 5 minutes (only if net is up) */
+        /* ---- Check for IP change every 5 minutes ---- */
         if (g_net_up && (loop - last_ip_check >= 300)) {
             char new_ip[64] = {0};
             u32 a = 0;
@@ -561,6 +420,5 @@ int main(int argc, char **argv) {
     }
 
     /* Unreachable */
-    exit_services();
     return 0;
 }
