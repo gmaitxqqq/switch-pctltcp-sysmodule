@@ -17,6 +17,10 @@
 #include "pctl_handler.h"
 #include "http_server.h"
 
+/* ---- Global state (declared before all functions) ---- */
+static bool g_net_up        = false;
+static bool g_bsd_initialized = false;
+
 /* =============================================================== */
 /* Sysmodule CRT0 overrides - CRITICAL for boot survival   */
 /* =============================================================== */
@@ -140,9 +144,6 @@ static void ip_to_str(u32 ip, char *buf, size_t bufsize) {
 /* =============================================================== */
 /* Network service management                           */
 /* =============================================================== */
-
-static bool g_net_up = false;
-static bool g_bsd_initialized = false;
 
 /* ---- ONE-TIME bsd:ux init ---- */
 /* socketInitialize() can ONLY be called ONCE per process.
