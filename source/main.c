@@ -62,112 +62,62 @@ static void ip_to_str(u32 ip, char *buf, size_t bufsize) {
              (int)((ip >> 24) & 0xFF));
 }
 
-/* ---- Service init ----
- * Based on MissionControl's initialization sequence.
- * Key differences from the old version:
- * 1. Initialize sm FIRST (required for all other services)
- * 2. Initialize FS and mount SD card (for logging)
- * 3. Don't exit on single service failure - keep running
- * 4. Use NifmServiceType_System for sysmodule context
- */
-static bool s_services_ready = false;
+/* ================================================================
+ * PSC Power State Monitor
+ * Based on sys-con / MissionControl pattern.
+ *
+ * When the Switch goes to sleep, we must:
+ *   - Stop the HTTP server
+ *   - Close network sockets
+ *   - Acknowledge sleep to PSC so the system can enter sleep
+ *
+ * When the Switch wakes up, we must:
+ *   - Re-initialize sockets
+ *   - Re-start the HTTP server
+ *   - Log the new IP address
+ * ================================================================ */
 
-static Result init_services(void) {
+static PscPmModule g_psc_module;
+static Thread      g_psc_thread;
+static UEvent      g_psc_exit_event;    /* signal to stop PSC thread */
+static bool        g_psc_active = false;
+
+/* Are our network services (socket + HTTP) currently up? */
+static bool        g_net_up = false;
+
+/* ---- Network service init/cleanup ---- */
+static Result net_init(void) {
     Result rc;
-    
-    /* Step 1: Service Manager (required for everything else) */
-    rc = smInitialize();
-    if (R_FAILED(rc)) {
-        /* Can't even log without SM... just sleep and retry */
-        return rc;
-    }
-    
-    /* Step 2: FS initialization + mount SD card (for logging) */
-    rc = fsInitialize();
-    if (R_SUCCEEDED(rc)) {
-        rc = fsdevMountSdmc();
-        if (R_SUCCEEDED(rc)) {
-            /* Create log directory */
-            mkdir("sdmc:/switch", 0777);
-            mkdir("sdmc:/switch/pctltcp-sysmodule", 0777);
-        }
-    }
-    
-    log_msg("pctltcp-sysmodule starting...");
-    
-    /* Step 3: System settings (non-fatal if fails) */
-    rc = setsysInitialize();
-    log_result("setsysInitialize", rc);
-    
-    /* Step 4: Parental control service */
-    rc = pctl_init();
-    log_result("pctl_init", rc);
-    
-    /* Step 5: Network interface (try System first, fall back to User) */
+
+    /* Network interface manager (try System first for sysmodule context) */
     rc = nifmInitialize(NifmServiceType_System);
     if (R_FAILED(rc)) {
         rc = nifmInitialize(NifmServiceType_User);
     }
-    log_result("nifmInitialize", rc);
-    
-    /* Step 6: Sockets with retry (network may not be up yet at boot) */
-    rc = -1;
-    for (int i = 0; i < 120; i++) {  /* 120 retries = ~4 minutes */
-        rc = socketInitializeDefault();
-        if (R_SUCCEEDED(rc)) break;
-        svcSleepThread(2000000000ULL);  /* 2 seconds */
-    }
-    log_result("socketInitialize", rc);
-    
     if (R_FAILED(rc)) {
-        log_msg("WARNING: Socket init failed after 120 retries, will keep trying in main loop");
+        log_result("nifmInitialize", rc);
+        return rc;
     }
-    
-    s_services_ready = R_SUCCEEDED(rc);
-    return rc;
-}
 
-/* ---- Service exit ---- */
-static void exit_services(void) {
-    if (http_server_is_running())
-        http_server_stop();
-    if (pctl_is_initialized())
-        pctl_exit();
-    nifmExit();
-    socketExit();
-    setsysExit();
-    fsdevUnmountDevice("sdmc");
-    fsExit();
-    smExit();
-}
-
-/* ---- sysmodule entry point ----
- * Built with switch.specs (application CRT0) -> int main()
- * Installed as boot2 sysmodule via exefs.nsp + boot2.flag
- * NPDM grants all service access and needed syscalls.
- */
-int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
-
-    /* Wait for system to be ready before initializing services.
-     * At boot, services may not be available yet.
-     * MissionControl uses sm::Initialize() in InitializeSystemModule(),
-     * but we're not using stratosphere, so we sleep first. */
-    svcSleepThread(5000000000ULL);  /* 5 seconds */
-
-    /* Initialize services (with retries) */
-    Result rc = init_services();
+    /* Sockets */
+    rc = socketInitializeDefault();
     if (R_FAILED(rc)) {
-        /* Even if some services fail, keep trying */
-        log_msg("WARNING: Some services failed to initialize, will retry in main loop");
+        log_result("socketInitialize", rc);
+        nifmExit();
+        return rc;
     }
 
-    /* Start HTTP server if sockets are ready */
-    if (s_services_ready) {
-        http_server_start();
-        log_msg(http_server_is_running() ? "HTTP server started." : "HTTP server start FAILED.");
+    /* HTTP server */
+    http_server_start();
+    if (!http_server_is_running()) {
+        log_msg("HTTP server start FAILED.");
+        socketExit();
+        nifmExit();
+        return -1;
     }
+
+    g_net_up = true;
+    log_msg("Network services initialized, HTTP server started.");
 
     /* Log IP address */
     char ip[64] = {0};
@@ -179,11 +129,230 @@ int main(int argc, char **argv) {
         log_msg(msg);
     }
 
+    return 0;
+}
+
+static void net_cleanup(void) {
+    if (!g_net_up) return;
+
+    if (http_server_is_running()) {
+        http_server_stop();
+        log_msg("HTTP server stopped.");
+    }
+
+    socketExit();
+    nifmExit();
+    g_net_up = false;
+    log_msg("Network services cleaned up.");
+}
+
+/* ---- PSC thread ---- */
+static void psc_thread_func(void *arg) {
+    (void)arg;
+
+    Waiter psc_waiter  = waiterForEvent(&g_psc_module.event);
+    Waiter exit_waiter = waiterForUEvent(&g_psc_exit_event);
+
+    while (true) {
+        s32 idx = -1;
+        Result rc = waitMulti(&idx, U64_MAX, psc_waiter, exit_waiter);
+        if (R_FAILED(rc)) continue;
+
+        /* Exit signal */
+        if (idx == 1) break;
+
+        /* Get power state change request */
+        PscPmState state;
+        u32 flags;
+        rc = pscPmModuleGetRequest(&g_psc_module, &state, &flags);
+        if (R_FAILED(rc)) continue;
+
+        switch (state) {
+            case PscPmState_FullAwake:       /* 0 - system fully awake */
+            case PscPmState_MinimumAwake:    /* 1 - waking up         */
+                log_msg("PSC: Wake up detected, re-initializing network...");
+                net_cleanup();
+                /* Small delay to let network interface come up */
+                svcSleepThread(2000000000ULL);  /* 2 seconds */
+                net_init();
+                break;
+
+            case PscPmState_SleepReady:      /* 2 - preparing to sleep */
+                log_msg("PSC: Sleep requested, cleaning up network...");
+                net_cleanup();
+                break;
+
+            case PscPmState_ShutdownReady:   /* 5 - preparing to shutdown */
+                log_msg("PSC: Shutdown requested, cleaning up...");
+                net_cleanup();
+                break;
+
+            default:
+                break;
+        }
+
+        /* MUST acknowledge — system waits for all modules before state change */
+        pscPmModuleAcknowledgeEx(&g_psc_module, state);
+    }
+}
+
+/* ---- PSC init/exit ---- */
+static Result psc_monitor_init(void) {
+    Result rc;
+
+    rc = pscmInitialize();
+    if (R_FAILED(rc)) {
+        log_result("pscmInitialize", rc);
+        return rc;
+    }
+
+    rc = pscmGetPmModule(&g_psc_module);
+    if (R_FAILED(rc)) {
+        log_result("pscmGetPmModule", rc);
+        pscmExit();
+        return rc;
+    }
+
+    /* Register as module 0x7E (custom homebrew ID), depend on Fs */
+    u32 deps[] = { PscPmModuleId_Fs };
+    rc = pscPmModuleInitialize(&g_psc_module, 0x7E, deps, sizeof(deps)/sizeof(u32));
+    if (R_FAILED(rc)) {
+        log_result("pscPmModuleInitialize", rc);
+        pscPmModuleClose(&g_psc_module);
+        pscmExit();
+        return rc;
+    }
+
+    ueventCreate(&g_psc_exit_event, false);
+
+    rc = threadCreate(&g_psc_thread, psc_thread_func, NULL,
+                      NULL, 0x1000, 0x2C, -2);
+    if (R_FAILED(rc)) {
+        log_result("threadCreate(psc)", rc);
+        pscPmModuleFinalize(&g_psc_module);
+        pscPmModuleClose(&g_psc_module);
+        pscmExit();
+        return rc;
+    }
+
+    rc = threadStart(&g_psc_thread);
+    if (R_FAILED(rc)) {
+        log_result("threadStart(psc)", rc);
+        threadClose(&g_psc_thread);
+        pscPmModuleFinalize(&g_psc_module);
+        pscPmModuleClose(&g_psc_module);
+        pscmExit();
+        return rc;
+    }
+
+    g_psc_active = true;
+    log_msg("PSC power monitor started.");
+    return 0;
+}
+
+static void psc_monitor_exit(void) {
+    if (!g_psc_active) return;
+
+    g_psc_active = false;
+    ueventSignal(&g_psc_exit_event);
+    pscPmModuleFinalize(&g_psc_module);
+    threadWaitForExit(&g_psc_thread);
+    threadClose(&g_psc_thread);
+    pscPmModuleClose(&g_psc_module);
+    pscmExit();
+    log_msg("PSC power monitor stopped.");
+}
+
+/* ================================================================
+ * Main service init — called once at startup
+ * ================================================================ */
+static bool s_base_ready = false;   /* sm + fs + setsys + pctl */
+
+static Result init_base_services(void) {
+    Result rc;
+
+    /* Step 1: Service Manager (required for everything) */
+    rc = smInitialize();
+    if (R_FAILED(rc)) return rc;
+
+    /* Step 2: FS + mount SD card (for logging) */
+    rc = fsInitialize();
+    if (R_SUCCEEDED(rc)) {
+        rc = fsdevMountSdmc();
+        if (R_SUCCEEDED(rc)) {
+            mkdir("sdmc:/switch", 0777);
+            mkdir("sdmc:/switch/pctltcp-sysmodule", 0777);
+        }
+    }
+
+    log_msg("pctltcp-sysmodule starting...");
+
+    /* Step 3: System settings (non-fatal) */
+    rc = setsysInitialize();
+    log_result("setsysInitialize", rc);
+
+    /* Step 4: Parental control service */
+    rc = pctl_init();
+    log_result("pctl_init", rc);
+
+    /* Step 5: PSC power state monitor (non-fatal but very useful) */
+    rc = psc_monitor_init();
+    log_result("psc_monitor_init", rc);
+
+    s_base_ready = true;
+    return 0;
+}
+
+static void exit_all_services(void) {
+    net_cleanup();
+    psc_monitor_exit();
+    if (pctl_is_initialized()) pctl_exit();
+    setsysExit();
+    fsdevUnmountDevice("sdmc");
+    fsExit();
+    smExit();
+}
+
+/* ================================================================
+ * sysmodule entry point
+ * Built with switch.specs (application CRT0) -> int main()
+ * Installed as boot2 sysmodule via exefs.nsp + boot2.flag
+ * NPDM grants all service access and needed syscalls.
+ * ================================================================ */
+int main(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+
+    /* Wait for system to be ready before initializing services */
+    svcSleepThread(5000000000ULL);  /* 5 seconds */
+
+    /* Initialize base services (sm, fs, setsys, pctl, psc) */
+    Result rc = init_base_services();
+    if (R_FAILED(rc)) {
+        log_msg("FATAL: Base services failed to initialize");
+    }
+
+    /* Initialize network (socket, nifm, HTTP server) with retry */
+    if (s_base_ready) {
+        for (int attempt = 0; attempt < 120; attempt++) {
+            rc = net_init();
+            if (R_SUCCEEDED(rc)) break;
+            /* Network may not be up yet at boot */
+            svcSleepThread(2000000000ULL);  /* 2 seconds */
+        }
+        if (R_FAILED(rc)) {
+            log_msg("WARNING: Network init failed after 120 retries");
+        }
+    }
+
+    log_msg("pctltcp-sysmodule initialization complete.");
+
     /* ---- Main loop ----
      * Keep the sysmodule alive forever.
-     * Periodically check:
-     * 1. Restart HTTP server if it crashed
-     * 2. Retry socket init if it failed at startup
+     * PSC thread handles sleep/wake automatically.
+     * Main loop does lightweight housekeeping:
+     * 1. Restart HTTP server if it crashed (not due to sleep)
+     * 2. Retry network init if it failed at startup
      * 3. Check for IP changes
      */
     u64 loop = 0;
@@ -194,26 +363,30 @@ int main(int argc, char **argv) {
         svcSleepThread(1000000000ULL);  /* 1 second */
         loop++;
 
-        /* If sockets aren't initialized yet, retry */
-        if (!s_services_ready && (loop % 10 == 0)) {
-            rc = socketInitializeDefault();
+        /* If network isn't up yet (startup retry), try again */
+        if (!g_net_up && s_base_ready && (loop % 10 == 0)) {
+            rc = net_init();
             if (R_SUCCEEDED(rc)) {
-                log_msg("Socket init succeeded on retry!");
-                s_services_ready = true;
-                http_server_start();
-                log_msg(http_server_is_running() ? "HTTP server started (delayed)." : "HTTP server start FAILED (delayed).");
+                log_msg("Network init succeeded on retry!");
             }
         }
 
-        /* Restart HTTP server if it died */
-        if (s_services_ready && (loop % 30 == 0) && !http_server_is_running()) {
-            log_msg("WARNING: HTTP server down, restarting...");
+        /* Restart HTTP server if it died (not due to sleep —
+         * PSC handles sleep/wake. This catches unexpected crashes.) */
+        if (g_net_up && (loop % 30 == 0) && !http_server_is_running()) {
+            log_msg("WARNING: HTTP server down (unexpected), restarting...");
             http_server_start();
-            log_msg("HTTP server restarted.");
+            if (http_server_is_running()) {
+                log_msg("HTTP server restarted.");
+            } else {
+                log_msg("HTTP server restart failed, will retry full net_init...");
+                net_cleanup();
+                /* net_init will be retried on next loop iteration */
+            }
         }
 
-        /* Check for IP change every 5 minutes */
-        if (loop - last_ip_check >= 300) {
+        /* Check for IP change every 5 minutes (only if net is up) */
+        if (g_net_up && (loop - last_ip_check >= 300)) {
             char new_ip[64] = {0};
             u32 a = 0;
             if (R_SUCCEEDED(nifmGetCurrentIpAddress(&a)) && a != 0) {
@@ -235,7 +408,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Unreachable, but keeps compiler happy */
-    exit_services();
+    /* Unreachable */
+    exit_all_services();
     return 0;
 }
