@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <stdarg.h>
 
 #include "pctl_handler.h"
 #include "http_server.h"
@@ -125,7 +126,7 @@ static void log_msg(const char *fmt, ...) {
 }
 
 /* ============================================================= */
-/* Network helpers – keep bsd:ux alive for entire process      */
+/* Network helpers - keep bsd:ux alive for entire process      */
 /* ============================================================= */
 
 static bool net_is_online(void) {
@@ -141,7 +142,7 @@ static void net_cleanup(void) {
         nifmExit();
         g_net_up = false;
     }
-    /* Do NOT call socketExit() — keep bsd:ux alive */
+    /* Do NOT call socketExit() - keep bsd:ux alive */
 }
 
 static Result net_init(void) {
@@ -185,7 +186,7 @@ static Result net_init(void) {
     if (waited >= 30 || R_FAILED(rc) || ipaddr == 0) {
         log_msg("IP address not available after 30 seconds, rc=0x%X, ip=%08X", rc, ipaddr);
         net_cleanup();
-        return MAKERESULT(Module_Custom, 1);
+        return MAKE_RESULT(Module_Custom, 1);
     }
 
     log_msg("IP address acquired: %d.%d.%d.%d",
@@ -239,10 +240,12 @@ int main(int argc, char **argv) {
     } else {
         u32 ip = 0;
         nifmGetCurrentIpAddress(&ip);
-        log_msg("Web UI: http://%d.%d.%d.%d:%d",
+        char ipstr[64];
+        snprintf(ipstr, sizeof(ipstr), "Web UI: http://%d.%d.%d.%d:%d",
                 (ip >> 0) & 0xFF, (ip >> 8) & 0xFF,
                 (ip >> 16) & 0xFF, (ip >> 24) & 0xFF,
                 HTTP_PORT);
+        log_msg("%s", ipstr);
     }
 
     log_msg("pctltcp-sysmodule initialization complete.");
@@ -254,24 +257,27 @@ int main(int argc, char **argv) {
         bool online = net_is_online();
 
         if (!online) {
-            if (g_net_up) {
-                log_msg("Network lost (sleep?). Stopping HTTP server.");
-                net_cleanup();
-            }
-        } else {
-            if (!g_net_up) {
-                log_msg("Network restored, starting HTTP server.");
-                net_init();
                 if (g_net_up) {
-                    u32 ip = 0;
-                    nifmGetCurrentIpAddress(&ip);
-                    log_msg("Web UI: http://%d.%d.%d.%d:%d",
-                            (ip >> 0) & 0xFF, (ip >> 8) & 0xFF,
-                            (ip >> 16) & 0xFF, (ip >> 24) & 0xFF,
-                            HTTP_PORT);
+                    log_msg("Network lost (sleep?). Stopping HTTP server.");
+                    net_cleanup();
+                    log_msg("nifm exited (network down, bsd:ux kept alive).");
+                }
+            } else {
+                if (!g_net_up) {
+                    log_msg("Network restored, starting HTTP server.");
+                    net_init();
+                    if (g_net_up) {
+                        u32 ip = 0;
+                        nifmGetCurrentIpAddress(&ip);
+                        char ipstr[64];
+                        snprintf(ipstr, sizeof(ipstr), "Web UI: http://%d.%d.%d.%d:%d",
+                                (ip >> 0) & 0xFF, (ip >> 8) & 0xFF,
+                                (ip >> 16) & 0xFF, (ip >> 24) & 0xFF,
+                                HTTP_PORT);
+                        log_msg("%s", ipstr);
+                    }
                 }
             }
-        }
     }
 
     /* Unreachable, but keep compiler happy */

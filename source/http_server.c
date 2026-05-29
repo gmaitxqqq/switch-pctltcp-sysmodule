@@ -286,14 +286,16 @@ static void *http_thread_func(void *arg)
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
 
-void http_server_start(void)
+Result http_server_start(void)
 {
     struct sockaddr_in addr;
+    int optval = 1;
 
     s_server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (s_server_fd < 0) return;
+    if (s_server_fd < 0) {
+        return MAKE_RESULT(Module_Custom, 1);
+    }
 
-    int optval = 1;
     setsockopt(s_server_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
 
     memset(&addr, 0, sizeof(addr));
@@ -304,13 +306,13 @@ void http_server_start(void)
     if (bind(s_server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         close(s_server_fd);
         s_server_fd = -1;
-        return;
+        return MAKE_RESULT(Module_Custom, 2);
     }
 
     if (listen(s_server_fd, 4) < 0) {
         close(s_server_fd);
         s_server_fd = -1;
-        return;
+        return MAKE_RESULT(Module_Custom, 3);
     }
 
     s_running = true;
@@ -320,6 +322,8 @@ void http_server_start(void)
     pthread_attr_setstacksize(&attr, 0x10000);  /* 64KB */
     pthread_create(&s_thread, &attr, http_thread_func, NULL);
     pthread_attr_destroy(&attr);
+
+    return 0;  /* Success */
 }
 
 void http_server_stop(void)
