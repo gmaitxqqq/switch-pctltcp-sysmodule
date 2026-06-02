@@ -5,23 +5,16 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    container:
-      image: devkitpro/devkita64:latest
+    container: devkitpro/devkita64:latest
 
     steps:
     - name: Checkout repo
       uses: actions/checkout@v4
-
-    - name: Install switch-tools
-      run: |
-        dkp-pacman -S --noconfirm switch-tools 2>/dev/null || true
-        # Verify tools are available
-        which npdmtool 2>/dev/null && echo "npdmtool: OK" || echo "npdmtool: NOT FOUND"
-        which elf2nso 2>/dev/null && echo "elf2nso: OK" || echo "elf2nso: NOT FOUND"
 
     - name: Build
       run: |
@@ -36,25 +29,20 @@ jobs:
 
         mkdir -p "${DIST}" "${FLAGS}"
 
-        # Copy the NSP built by switch_rules (contains NSO + NPDM)
         if [ -f "pctltcp-sysmodule.nsp" ]; then
           cp "pctltcp-sysmodule.nsp" "${DIST}/exefs.nsp"
-          echo "NSP from switch_rules (NSO+NPDM): OK"
+          echo "NSP: OK"
         else
           echo "ERROR: pctltcp-sysmodule.nsp not found!"
           ls -la *.nsp *.nso *.npdm *.elf 2>/dev/null || true
           exit 1
         fi
 
-        # Copy toolbox.json — required for Hekate/DeepSea toolbox visibility
         if [ -f "toolbox.json" ]; then
           cp "toolbox.json" "${DIST}/toolbox.json"
           echo "toolbox.json: OK"
-        else
-          echo "WARNING: toolbox.json not found (Hekate won't show this module)"
         fi
 
-        # Create boot2 flag for auto-start
         touch "${FLAGS}/boot2.flag"
 
         echo "--- Release contents ---"
