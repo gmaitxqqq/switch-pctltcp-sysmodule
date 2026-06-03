@@ -2,12 +2,9 @@
 // Build: make -> pctltcp-sysmodule.nsp (with APP_JSON)
 // Install: sd:/atmosphere/contents/010000000000BD23/exefs.nsp + flags/boot2.flag
 //
-// v1.4.1: Sleep/wake detection via time-jump.
-//         v1.4 health checks missed some sleep/wake events because
-//         nifm could appear healthy while sockets were stale.
-//         Now we detect time jumps (>5s) in the main loop, which
-//         indicates the system was suspended (sleep), and force a
-//         full network reinit on wake.
+// v1.5.0: Fix http_server_stop() race (close socket before join),
+//         support negative minutes, restart timer after set,
+//         reduce WiFi wait delay from 2s to 0.2s.
 
 #include <switch.h>
 #include <stdio.h>
@@ -284,7 +281,7 @@ static Result http_restart(void) {
 
     /* Small additional delay: even after IP assignment, the WLAN
      * interface may need a moment to become fully operational. */
-    svcSleepThread(2000000000ULL);  /* 2 seconds */
+    svcSleepThread(200000000ULL);  /* 0.2 seconds */
 
     http_server_start();
     if (!http_server_is_running()) {
@@ -305,7 +302,7 @@ static Result init_services(void) {
     mkdir("sdmc:/switch", 0777);
     mkdir("sdmc:/switch/pctltcp-sysmodule", 0777);
 
-    log_msg("pctltcp-sysmodule starting (v1.4.1 - sleep fix)...");
+    log_msg("pctltcp-sysmodule starting (v1.5.0 - race fix)...");
 
     /* Load timezone rule for correct day-of-week calculation.
      * This MUST be called after timeInitialize() (which is in __appInit).

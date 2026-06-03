@@ -7,7 +7,7 @@
  *   POST /api/allow     -> Add minutes to today's limit (additive)
  *                          body: minutes=N
  *                          calc: new_limit = current_limit + N
- *   Version: v1.3
+ *   Version: v1.5.0
  */
 #include "http_server.h"
 #include "pctl_handler.h"
@@ -99,7 +99,7 @@ static void api_status(int fd)
     char json[256];
     static const char *day_names[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
     snprintf(json, sizeof(json),
-        "{\"daily_limit_min\":%u,\"remaining_min\":%u,\"played_min\":%u,\"today\":%d,\"today_name\":\"%s\",\"version\":\"v1.3\"}",
+        "{\"daily_limit_min\":%u,\"remaining_min\":%u,\"played_min\":%u,\"today\":%d,\"today_name\":\"%s\",\"version\":\"v1.5.0\"}",
         daily_limit, remaining_min, played_min, today, day_names[today]);
 
     http_send(fd, "200 OK", "application/json", json);
@@ -107,11 +107,11 @@ static void api_status(int fd)
 
 static void api_allow(int fd, const char *body)
 {
-    unsigned int allow_min = 0;
+    int allow_min = 0;
     const char *p = strstr(body, "minutes");
     if (p) {
         p = strchr(p + 7, '=');
-        if (p) allow_min = (unsigned int)atoi(p + 1);
+        if (p) allow_min = atoi(p + 1);
     }
 
     Result rc = pctl_init();
@@ -128,10 +128,18 @@ static void api_allow(int fd, const char *body)
         u32 daily_limit = 0;
         pctl_get_daily_limit_minutes(&daily_limit);
 
-        u32 new_limit = daily_limit + allow_min;
+        /* 有符号运算：支持负数减时间 */
+        int new_limit = (int)daily_limit + allow_min;
+        if (new_limit < 0) new_limit = 0;
         if (new_limit > 1440) new_limit = 1440;
 
-        rc = pctl_set_day_limit_minutes(today, new_limit);
+        rc = pctl_set_day_limit_minutes(today, (u32)new_limit);
+
+        /* 设置后重启计时器使变更立即生效 */
+        if (R_SUCCEEDED(rc)) {
+            pctl_stop_play_timer();
+            pctl_start_play_timer();
+        }
     }
 
     pctl_exit();
@@ -152,7 +160,7 @@ static const char *WEB_HTML =
 "<head>"
 "<meta charset='UTF-8'>"
 "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-"<title>Switch Timer v1.3</title>"
+"<title>Switch Timer v1.5</title>"
 "<style>"
 "body{font-family:sans-serif;background:#1a1a2e;color:#fff;text-align:center;padding:20px;margin:0}"
 ".box{background:rgba(255,255,255,0.1);border-radius:12px;padding:20px;margin:15px 0}"
@@ -169,7 +177,7 @@ static const char *WEB_HTML =
 "</style>"
 "</head>"
 "<body>"
-"<h2>Switch Parental Control <small>v1.3</small></h2>"
+"<h2>Switch Parental Control <small>v1.5</small></h2>"
 "<div class='box'>"
 "<div class='row'>"
 "<div class='tile'><div class='lbl'>Played</div><div class='big' id='played'>--</div></div>"
@@ -186,6 +194,10 @@ static const char *WEB_HTML =
 "<button class='btn-sm' onclick='quickSet(30)'>+30</button>"
 "<button class='btn-sm' onclick='quickSet(60)'>+60</button>"
 "<button class='btn-sm' onclick='quickSet(90)'>+90</button>"
+"</div>"
+"<div class='btns'>"
+"<button class='btn-sm' onclick='quickSet(-10)'>-10</button>"
+"<button class='btn-sm' onclick='quickSet(-30)'>-30</button>"
 "</div>"
 "<button onclick='allow()'>Confirm</button>"
 "<div id='msg'></div>"
@@ -359,15 +371,18 @@ void http_server_start(void)
 void http_server_stop(void)
 {
     s_running = false;
+    s_generation++;  /* 让旧线程的 select() 检测到代际变化后退出 */
+
+    /* 先关 socket，打断 select() 等待，避免死锁 */
+    if (s_server_fd >= 0) {
+        int fd = s_server_fd;
+        s_server_fd = -1;
+        close(fd);
+    }
 
     if (s_thread_active) {
         pthread_join(s_thread, NULL);
         s_thread_active = false;
-    }
-
-    if (s_server_fd >= 0) {
-        close(s_server_fd);
-        s_server_fd = -1;
     }
 }
 

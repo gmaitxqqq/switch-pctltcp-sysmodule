@@ -2,7 +2,7 @@
 
 开机自动启动的后台系统服务（boot2 sysmodule），通过浏览器访问 Switch IP 即可设置家长控制时间。无需手动打开任何应用，开机即用。
 
-**版本**：v1.4.1 | **端口**：8081 | **固件**：兼容 Atmosphere 22.1.0+
+**版本**：v1.5.0 | **端口**：8081 | **固件**：兼容 Atmosphere 22.1.0+
 
 ---
 
@@ -43,8 +43,8 @@ SD卡:/
 ### Web UI 功能
 
 - 查看实时计时状态（运行/暂停、剩余时间）
-- 按天设置每日时间限制（周日至周六）
-- 统一设置所有天相同限额
+- 快捷加减时间（+15/+30/+60/+90 分钟，-10/-30 分钟）
+- 输入负数直接减少剩余游玩时间
 - 启动 / 暂停计时器
 
 ### REST API
@@ -53,8 +53,7 @@ SD卡:/
 |--------|------|------|
 | GET | `/` | Web UI 页面 |
 | GET | `/api/status` | 计时器状态（JSON） |
-| POST | `/api/allow` | 增加游玩时间：`{"minutes": 30}` |
-| GET | `/api/version` | 版本号 |
+| POST | `/api/allow` | 增减游玩时间：`minutes=30` 或 `minutes=-10` |
 
 ---
 
@@ -74,9 +73,11 @@ SD:/switch/pctltcp-sysmodule/sysmodule.log
 
 - **开机自启**：boot2 方式，Atmosphere 启动时自动加载
 - **后台常驻**：不需要打开任何应用，完全后台运行
-- **息屏/亮屏自动恢复**（v1.4.1）：检测到息屏唤醒后，等待 WiFi 重连再自动重启 HTTP 服务，无需手动干预
-- **彻底解决 0x559 错误**：socket/nifm 只在进程启动时初始化一次，永不重复调用 socketExit/socketInitialize
-- **孤儿 fd 自动清理**：HTTP 线程异常退出后自动清理残留 socket，防止端口泄漏
+- **息屏/亮屏自动恢复**：检测到息屏唤醒后，等待 WiFi 重连再自动重启 HTTP 服务
+- **负数减时间**：Web UI 输入负数可直接减少剩余游玩时间
+- **计时器即时生效**：设置时间后自动重启计时器，变更立即生效
+- **彻底解决 0x559 错误**：socket/nifm 只在进程启动时初始化一次
+- **孤儿 fd 自动清理**：HTTP 线程异常退出后自动清理残留 socket
 - **IP 变化检测**：切换 WiFi 后自动更新日志
 - **Hekate 工具箱**：`toolbox.json` 支持在 Hekate 中显示插件名称
 
@@ -128,10 +129,10 @@ make clean && make        # 输出 pctltcp-sysmodule.nsp
 - **pctl 按需使用**：每次 API 调用 init/exit，避免单客户端限制冲突
 - **时区处理**：sysmodule 中 `localtime()` 无时区数据，通过 `setsys` + `timeLoadTimeZoneRule` 显式加载
 - **息屏检测**：主循环通过 `UserSystemClock` 时间跳跃（>5秒）检测息屏/唤醒事件
-- **WiFi 重连等待**：`http_restart()` 轮询 `nifmGetCurrentIpAddress()` 直到 IP 非 0，再额外等 2 秒 WLAN 稳定
-- **socket 只初始化一次**：`socketInitialize(&cfg)` 使用 `BsdServiceType_System`，进程生命周期内永不调用 `socketExit()`，彻底避免 0x559
+- **WiFi 重连等待**：`http_restart()` 轮询 `nifmGetCurrentIpAddress()` 直到 IP 非 0
+- **socket 只初始化一次**：`socketInitialize(&cfg)` 使用 `BsdServiceType_System`，进程生命周期内永不调用 `socketExit()`
 - **代际计数器**：`s_generation` 防止旧线程在重启后操作已失效的 socket fd
-- **孤儿 fd 清理**：`http_server_start()` 开头自动关闭残留 fd 并 join 孤儿线程
+- **http_server_stop() 安全关闭**：先关 socket 打断 select()，再 join 线程，避免死锁
 
 ---
 
@@ -143,6 +144,7 @@ make clean && make        # 输出 pctltcp-sysmodule.nsp
 | [switch-pctltcp-nro](https://github.com/gmaitxqqq/switch-pctltcp-nro) | 前台 NRO + TCP | 固定 IP 局域网，PC 客户端远程管理 |
 | [switch-pctltcp-web](https://github.com/gmaitxqqq/switch-pctltcp-web) | 前台 NRO + Web UI | 外出时手机浏览器管理（无固定 IP） |
 | **switch-pctltcp-sysmodule**（本仓库） | 后台 sysmodule | 固定 IP 家庭环境，开机自动运行 |
+| [switch-pctltcp-remote](https://github.com/gmaitxqqq/switch-pctltcp-remote) | 后台 sysmodule + 远程 | 固定 IP 家庭 + 外网远程管理 |
 
 ---
 
@@ -150,7 +152,8 @@ make clean && make        # 输出 pctltcp-sysmodule.nsp
 
 | 版本 | 变更 |
 |------|------|
-| **v1.4.1** | **息屏/亮屏自动恢复**：时间跳跃检测息屏、WiFi 重连等待、孤儿 fd 自动清理、代际计数器防 stale fd 崩溃；实测 4 次息屏/亮屏均成功恢复 |
+| **v1.5.0** | **修复 http_server_stop() 竞态**：先关 socket 再 join 线程，避免息屏唤醒死锁；**支持负数减时间**：api_allow 接受负数参数；**设置后重启计时器**：变更立即生效；WiFi 等待延迟从 2s 缩短到 0.2s |
+| **v1.4.1** | 息屏/亮屏自动恢复：时间跳跃检测息屏、WiFi 重连等待、孤儿 fd 自动清理、代际计数器防 stale fd 崩溃 |
 | **v1.4** | 移除 PSC 电源监控（解决休眠唤醒死机），改用主循环健康检查自动恢复 |
 | **v1.3** | 修复星期读取错误，显式加载时区规则；端口改为 8081 |
 | **v1.2** | 修复 pctl 按需 init/exit，避免与系统家长控制界面冲突 |
