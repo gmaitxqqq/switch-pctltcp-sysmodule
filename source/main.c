@@ -248,49 +248,6 @@ static void net_cleanup(void) {
  * reconnect. If we create a new socket before WiFi is ready,
  * bind() succeeds but the socket is bound to a dead interface
  * → "restarted successfully" but actually unreachable. */
-static Result http_server_restart(void) {
-    /* http_server_start() handles all cleanup internally:
-     * - close old socket fd
-     * - join orphaned thread
-     * So we just need to stop the running thread (if any) and wait for WiFi. */
-
-    http_server_stop();  /* always call — safe even if not running */
-
-    /* Wait for WiFi to reconnect: poll nifm for valid IP address.
-     * After sleep/wake, WiFi takes 3-10s to reconnect. If we
-     * bind before WiFi is ready, the socket is unreachable. */
-    log_msg("Waiting for WiFi to reconnect...");
-    int wifi_wait = 0;
-    while (wifi_wait < 30) {  /* up to 30 seconds */
-        u32 ip = 0;
-        Result rc = nifmGetCurrentIpAddress(&ip);
-        if (R_SUCCEEDED(rc) && ip != 0) {
-            char ipstr[64];
-            ip_to_str(ip, ipstr, sizeof(ipstr));
-            char msg[256];
-            snprintf(msg, sizeof(msg), "WiFi back (IP=%s), restarting HTTP server.", ipstr);
-            log_msg(msg);
-            break;
-        }
-        svcSleepThread(1000000000ULL);  /* 1 second */
-        wifi_wait++;
-    }
-    if (wifi_wait >= 30) {
-        log_msg("WiFi not back after 30s, restarting HTTP server anyway.");
-    }
-
-    /* Small additional delay: even after IP assignment, the WLAN
-     * interface may need a moment to become fully operational. */
-    svcSleepThread(200000000ULL);  /* 0.2 seconds */
-
-    http_server_start();
-    if (!http_server_is_running()) {
-        log_msg("HTTP server restart FAILED.");
-        return -1;
-    }
-    log_msg("HTTP server restarted successfully.");
-    return 0;
-}
 
 /* ================================================================
  * Main service init - called once at startup
