@@ -34,10 +34,6 @@
 static Service s_pctlSrv;
 static bool s_initialized = false;
 
-/* Cached timezone rule for reliable day-of-week calculation.
- * timeToCalendarTimeWithMyRule() often fails in sysmodule context
- * because the time service doesn't auto-load the timezone rule.
- * We load it explicitly once at startup and cache it here. */
 static TimeZoneRule s_tz_rule;
 static bool s_tz_rule_loaded = false;
 
@@ -91,10 +87,8 @@ Result pctl_load_timezone(void)
     Result rc;
     TimeLocationName tz_name = {0};
 
-    /* Get the device timezone location name from settings */
     rc = setsysInitialize();
     if (R_FAILED(rc)) {
-        /* Can't get timezone name, day-of-week may be wrong */
         return rc;
     }
     rc = setsysGetDeviceTimeZoneLocationName(&tz_name);
@@ -104,7 +98,6 @@ Result pctl_load_timezone(void)
         return rc;
     }
 
-    /* Load the timezone rule from the time service */
     rc = timeLoadTimeZoneRule(&tz_name, &s_tz_rule);
     if (R_SUCCEEDED(rc)) {
         s_tz_rule_loaded = true;
@@ -115,7 +108,6 @@ Result pctl_load_timezone(void)
 
 /* ------------------------------------------------------------------ */
 /* Re-initialize pctl session (needed between certain calls)           */
-/* Based on switch-parental-timer v11.5 pctl_ops_reinit()          */
 /* ------------------------------------------------------------------ */
 static Result pctl_reinit(void)
 {
@@ -127,12 +119,6 @@ static Result pctl_reinit(void)
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
 
-/**
- * pctl_start_play_timer / pctl_stop_play_timer:
- *   Do NOT call pctl_reinit() — reinit would reset the pctl
- *   service state and the timer would not actually start/stop.
- *   Based on v11.5: it never reinit() for read/control commands.
- */
 Result pctl_start_play_timer(void)
 {
     if (!s_initialized) return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
@@ -183,8 +169,6 @@ Result pctl_is_restricted(bool *restricted)
 
 /* ------------------------------------------------------------------ */
 /* Settings read/write                                                  */
-/* Based on switch-parental-timer v11.5 pctl_play_timer_query()    */
-/* and pctl_play_timer_set_days()                                      */
 /* ------------------------------------------------------------------ */
 
 Result pctl_get_settings(PlayTimerSettings *settings)
@@ -194,11 +178,6 @@ Result pctl_get_settings(PlayTimerSettings *settings)
 
     if (!s_initialized) return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
 
-    /* GetPlayTimerSettings (cmd 145601):
-     * Output: u16[34] as inline parameter.
-     * Based on v11.5 line 178: serviceDispatchOut(srv, 145601, c)
-     * where c is u16[34]. Pure inline, NO buffer_attrs/buffers!
-     * Do NOT reinit() — v11.5 never does this for read commands. */
     u16 c[34];
     memset(c, 0, sizeof(c));
 
@@ -218,11 +197,6 @@ Result pctl_set_settings(const PlayTimerSettings *settings)
     Result rc = pctl_reinit();
     if (R_FAILED(rc)) return rc;
 
-    /* SetPlayTimerSettingsForDebug (cmd 195101):
-     * Input: u16[34] as inline parameter.
-     * Based on v11.5 line 204:
-     *   serviceDispatchIn(pctlGetServiceSession_Service(), 195101, c)
-     * where c is u16[34]. Pure inline, NO buffer_attrs/buffers! */
     u16 c[34];
     memcpy(c, settings->raw, sizeof(c));
 
@@ -245,12 +219,11 @@ Result pctl_get_day_limit_minutes(int day, u32 *minutes)
     if (R_FAILED(rc)) return rc;
 
     if (day == 7) {
-        /* Return max minutes across all days */
         *minutes = 0;
         for (int d = 0; d < PCTL_DAYS; d++) {
             u16 m = settings.raw[PCTL_DAY_MINUTES_OFFSET(d)];
             if (m == PT_DAY_NOLIMIT) {
-                *minutes = 0;  /* any day unlimited => report 0 */
+                *minutes = 0;
                 return 0;
             }
             if (m > *minutes) *minutes = m;
@@ -279,13 +252,11 @@ Result pctl_set_day_limit_minutes(int day, u32 minutes)
         val = (u16)minutes;
     }
 
-    /* Set header if not already set */
     if (settings.raw[0] == 0) {
         settings.raw[0] = 0x0101;
         settings.raw[1] = 0x0001;
     }
 
-    /* Set day flag + minutes */
     settings.raw[PCTL_DAY_FLAG_OFFSET(day)]    = (val != PT_DAY_NOLIMIT) ? 0x0100 : 0x0000;
     settings.raw[PCTL_DAY_MINUTES_OFFSET(day)] = val;
 
@@ -306,7 +277,6 @@ Result pctl_set_daily_limit_minutes(u32 minutes)
         val = (u16)minutes;
     }
 
-    /* Set header */
     settings.raw[0] = (val != PT_DAY_NOLIMIT) ? 0x0101 : 0x0000;
     settings.raw[1] = (val != PT_DAY_NOLIMIT) ? 0x0001 : 0x0000;
 
@@ -318,22 +288,11 @@ Result pctl_set_daily_limit_minutes(u32 minutes)
     return pctl_set_settings(&settings);
 }
 
-/**
- * Get today's day-of-week in Switch convention: 0=Sun, 1=Mon, ..., 6=Sat.
- *
- * Uses multiple approaches in order of reliability:
- * 1. timeGetCurrentTime() + timeToCalendarTimeWithMyRule() (auto timezone)
- * 2. timeGetCurrentTime() + timeToCalendarTime() with explicitly loaded rule
- * 3. timeGetCurrentTime() + gmtime() (UTC, may be off by 1 day for UTC+ users)
- * 4. C time()/localtime() (may fail in sysmodule)
- * 5. Returns 0 (Sunday) as last resort
- */
 int pctl_get_today_day(void)
 {
     u64 now_posix = 0;
     Result rc;
 
-    /* Try all clock sources - Network > Local > User */
     rc = timeGetCurrentTime(TimeType_NetworkSystemClock, &now_posix);
     if (R_FAILED(rc) || now_posix <= 946684800ULL) {
         rc = timeGetCurrentTime(TimeType_LocalSystemClock, &now_posix);
@@ -346,13 +305,11 @@ int pctl_get_today_day(void)
         TimeCalendarTime cal;
         TimeCalendarAdditionalInfo additional;
 
-        /* Method 1: WithMyRule (auto timezone) */
         rc = timeToCalendarTimeWithMyRule(now_posix, &cal, &additional);
         if (R_SUCCEEDED(rc)) {
             return (int)additional.wday;
         }
 
-        /* Method 2: Explicitly loaded timezone rule (most reliable in sysmodule) */
         if (s_tz_rule_loaded) {
             rc = timeToCalendarTime(&s_tz_rule, now_posix, &cal, &additional);
             if (R_SUCCEEDED(rc)) {
@@ -360,12 +317,6 @@ int pctl_get_today_day(void)
             }
         }
 
-        /* Method 3: gmtime() gives UTC day — off by 1 for UTC+ users
-         * but still better than returning wrong day consistently.
-         * We add a simple heuristic: if it's between 0:00-8:00 UTC
-         * and we're likely in a UTC+ timezone, the local day might
-         * be the next one. But without knowing the offset, we can't
-         * be sure. Just return UTC day and hope for the best. */
         {
             time_t t = (time_t)now_posix;
             struct tm *tm_info = gmtime(&t);
@@ -374,7 +325,6 @@ int pctl_get_today_day(void)
         }
     }
 
-    /* Method 4: C standard library (may return epoch 0 in sysmodule) */
     {
         time_t t = time(NULL);
         if (t != (time_t)-1 && t > 946684800ULL) {
@@ -384,13 +334,11 @@ int pctl_get_today_day(void)
         }
     }
 
-    /* Last resort: return Sunday */
     return 0;
 }
 
 Result pctl_get_daily_limit_minutes(u32 *minutes)
 {
-    /* Read today's limit, not a hardcoded day=0 (Sun) */
     int today = pctl_get_today_day();
     return pctl_get_day_limit_minutes(today, minutes);
 }
@@ -399,21 +347,16 @@ Result pctl_reset_play_time(void)
 {
     Result rc;
 
-    /* Step 1: Stop the play timer */
     rc = pctl_stop_play_timer();
     if (R_FAILED(rc)) return rc;
 
-    /* Step 2: Get current settings */
     PlayTimerSettings settings;
     rc = pctl_get_settings(&settings);
     if (R_FAILED(rc)) return rc;
 
-    /* Step 3: Re-apply the same settings — this resets the internal
-     * play time counter for today, restoring remaining time to the limit */
     rc = pctl_set_settings(&settings);
     if (R_FAILED(rc)) return rc;
 
-    /* Step 4: Restart the play timer */
     rc = pctl_start_play_timer();
     if (R_FAILED(rc)) return rc;
 

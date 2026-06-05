@@ -1,161 +1,104 @@
-# Switch 家长控制 Web UI — 后台常驻版
+# switch-pctltcp-sysmodule
 
-开机自动启动的后台系统服务（boot2 sysmodule），通过浏览器访问 Switch IP 即可设置家长控制时间。无需手动打开任何应用，开机即用。
+Nintendo Switch 家长控制 sysmodule，**局域网版**（纯 LAN，无需外网服务器）。
 
-**版本**：v1.5.0 | **端口**：8081 | **固件**：兼容 Atmosphere 22.1.0+
+> 如果你需要 **远程控制**（外出时管理），请使用 [switch-pctltcp-remote](https://github.com/gmaitxqqq/switch-pctltcp-remote)。
 
----
+## 功能
 
-## 适用场景
+| 特性 | 说明 |
+|------|------|
+| 开机自启 | boot2 sysmodule，无需手动启动 |
+| 浏览器控制 | `http://<Switch-IP>:8081` |
+| 按天设限 | 每天独立设置游玩时限（5 分钟增量） |
+| 周配额 | 每天独立限额，互不干扰 |
+| 实时查看 | 剩余时间、已玩时间 |
+| 随时追加 | 正数加时间，负数减时间 |
+| 休眠恢复 | 网络断线自动重连 |
+| 配置热重载 | 改配置无需重启 |
 
-> 固定 IP 的家庭环境，Switch 常驻同一 WiFi，开机自动运行，随时用浏览器管理。
+## 快速开始
 
----
+### 安装
 
-## 安装
+1. 从 [Release](../../releases) 页面下载最新版 `pctltcp-sysmodule.zip`
+2. 解压到 SD 卡根目录，确认目录结构：
+   ```
+   sdmc:/atmosphere/contents/010000000000BD23/
+   ├── exefs.nsp
+   ├── toolbox.json
+   └── flags/
+       └── boot2.flag
+   ```
+3. 重启 Switch（或通过 Hekate 重启到 CFW）
 
-1. 从 [Releases](../../releases) 下载最新版 zip
-2. 解压后复制到 SD 卡，最终目录结构：
+### 使用
 
-```
-SD卡:/
-└── atmosphere/
-    └── contents/
-        └── 010000000000BD23/
-            ├── exefs.nsp        ← 重命名自 pctltcp-sysmodule.nsp
-            ├── toolbox.json
-            └── flags/
-                └── boot2.flag   ← 空文件，开机自启
-```
+1. 在 Switch 上确认 sysmodule 已加载（查看日志 `sdmc:/switch/pctltcp-sysmodule/sysmodule.log`）
+2. 在电脑/手机浏览器访问 `http://<Switch-IP>:8081`
+3. 输入要追加的分钟数，点 Confirm
 
-3. 重启 Switch，服务自动启动
+> 💡 查看 Switch IP：`设置 → 互联网 → 连接状态 → IP 地址`
 
-> ⚠️ **注意**：下载的 `pctltcp-sysmodule.nsp` 需重命名为 `exefs.nsp` 放入上述目录。
+## API
 
----
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/api/status` | GET | 获取当前状态（JSON） |
+| `/api/allow` | POST `minutes=N` | 追加（正数）或减少（负数）游玩时间 |
 
-## 使用方法
+### 状态 JSON 格式
 
-1. 确认 Switch 已连接 WiFi（设置 → 互联网 → 查看 IP 地址）
-2. 电脑/手机浏览器打开 `http://<Switch-IP>:8081`
-3. 即可设置家长控制时间
-
-### Web UI 功能
-
-- 查看实时计时状态（运行/暂停、剩余时间）
-- 快捷加减时间（+15/+30/+60/+90 分钟，-10/-30 分钟）
-- 输入负数直接减少剩余游玩时间
-- 启动 / 暂停计时器
-
-### REST API
-
-| Method | Path | 说明 |
-|--------|------|------|
-| GET | `/` | Web UI 页面 |
-| GET | `/api/status` | 计时器状态（JSON） |
-| POST | `/api/allow` | 增减游玩时间：`minutes=30` 或 `minutes=-10` |
-
----
-
-## 调试
-
-无法访问时，查看 SD 卡日志：
-
-```
-SD:/switch/pctltcp-sysmodule/sysmodule.log
+```json
+{
+  "daily_limit_min": 120,
+  "remaining_min": 45,
+  "played_min": 75,
+  "today": 3,
+  "today_name": "Wed",
+  "version": "v1.8.0"
+}
 ```
 
-日志包含：启动时间、IP 地址、HTTP server 状态、错误信息、时区加载结果。
+## 技术说明
 
----
+### 架构
 
-## 特性
+- **boot2 sysmodule**：开机自动启动，独立后台进程
+- **单线程 + select()**：HTTP 服务器基于 `select()` 事件驱动，无线程生命周期 bug
+- **永久线程**：HTTP 线程持续运行，WiFi 重连时只换 socket，不销毁线程
+- **懒初始化 pctl**：仅在 HTTP 请求时初始化 pctl 服务，避免启动时崩溃
 
-- **开机自启**：boot2 方式，Atmosphere 启动时自动加载
-- **后台常驻**：不需要打开任何应用，完全后台运行
-- **息屏/亮屏自动恢复**：检测到息屏唤醒后，等待 WiFi 重连再自动重启 HTTP 服务
-- **负数减时间**：Web UI 输入负数可直接减少剩余游玩时间
-- **计时器即时生效**：设置时间后自动重启计时器，变更立即生效
-- **彻底解决 0x559 错误**：socket/nifm 只在进程启动时初始化一次
-- **孤儿 fd 自动清理**：HTTP 线程异常退出后自动清理残留 socket
-- **IP 变化检测**：切换 WiFi 后自动更新日志
-- **Hekate 工具箱**：`toolbox.json` 支持在 Hekate 中显示插件名称
+### 修复历史
 
----
+| 版本 | 重要修复 |
+|------|---------|
+| v1.8.0 | 合并 remote 架构改进：去掉 `pthread_join()`（修复 2168-0002），增加 client socket 超时，线程永久运行 |
+| v1.5.0 | 修复 `http_server_stop()` 竞态，支持负数减少时间，减少 WiFi 等待延迟 |
+| v1.4.1 | 休眠/唤醒自动恢复网络连接 |
 
-## 卸载
+### 构建
 
-删除 SD 卡上对应目录即可：
-
-```
-SD:/atmosphere/contents/010000000000BD23/
-```
-
-重启 Switch。
-
----
-
-## 项目结构
-
-```
-switch-pctltcp-sysmodule/
-├── source/
-│   ├── main.c              # sysmodule 入口 + 息屏检测 + 网络恢复循环
-│   ├── http_server.c/h     # HTTP 服务端 + 嵌入式 Web UI
-│   └── pctl_handler.c/h    # pctl IPC 封装 + 时区加载
-├── pctltcp-sysmodule.json  # NPDM 权限配置
-├── toolbox.json            # Hekate 工具箱声明
-└── Makefile
-```
-
----
-
-## 从源码编译
+需要 [devkitPro](https://devkitpro.org/) + libnx：
 
 ```bash
-export DEVKITPRO=/opt/devkitpro
-make clean && make        # 输出 pctltcp-sysmodule.nsp
+cd /path/to/switch-pctltcp-sysmodule
+make
 ```
 
-推送至 GitHub 后 Actions 自动构建，在 [Actions](../../actions) 页面下载 Artifact。
+输出：`pctltcp-sysmodule.nsp`，安装到 `sdmc:/atmosphere/contents/010000000000BD23/exefs.nsp`
 
----
+## 常见问题
 
-## 技术要点
+**Q: 浏览器访问不了？**
+A: 确认 Switch 和手机/电脑在同一 WiFi；确认端口 8081 未被防火墙拦截。
 
-- **boot2 sysmodule**：与 MissionControl 蓝牙插件相同机制
-- **CRT0 覆写**：`__nx_applet_type = 0` + 自定义 `__appInit`/`__appExit`
-- **NPDM 权限**：`service_access: ["*"]`，`service_host: []`（空数组，非通配符）
-- **pctl 按需使用**：每次 API 调用 init/exit，避免单客户端限制冲突
-- **时区处理**：sysmodule 中 `localtime()` 无时区数据，通过 `setsys` + `timeLoadTimeZoneRule` 显式加载
-- **息屏检测**：主循环通过 `UserSystemClock` 时间跳跃（>5秒）检测息屏/唤醒事件
-- **WiFi 重连等待**：`http_restart()` 轮询 `nifmGetCurrentIpAddress()` 直到 IP 非 0
-- **socket 只初始化一次**：`socketInitialize(&cfg)` 使用 `BsdServiceType_System`，进程生命周期内永不调用 `socketExit()`
-- **代际计数器**：`s_generation` 防止旧线程在重启后操作已失效的 socket fd
-- **http_server_stop() 安全关闭**：先关 socket 打断 select()，再 join 线程，避免死锁
+**Q: 安装后 Switch 启动卡住？**
+A: 删除 `sdmc:/atmosphere/contents/010000000000BD23/` 目录，重启，排查日志 `sdmc:/switch/pctltcp-sysmodule/sysmodule.log`。
 
----
+**Q: 和 remote 版有什么区别？**
+A: 此版本（sysmodule）只支持局域网控制；remote 版额外支持通过互联网远程下发控制命令。两个版本 **不能同时使用**。
 
-## 同系列工具
+## 授权
 
-| 项目 | 类型 | 适用场景 |
-|------|------|---------|
-| [switch-parental-timer](https://github.com/gmaitxqqq/switch-parental-timer) | 本机 NRO | 在 Switch 上直接操作，无需网络 |
-| [switch-pctltcp-nro](https://github.com/gmaitxqqq/switch-pctltcp-nro) | 前台 NRO + TCP | 固定 IP 局域网，PC 客户端远程管理 |
-| [switch-pctltcp-web](https://github.com/gmaitxqqq/switch-pctltcp-web) | 前台 NRO + Web UI | 外出时手机浏览器管理（无固定 IP） |
-| **switch-pctltcp-sysmodule**（本仓库） | 后台 sysmodule | 固定 IP 家庭环境，开机自动运行 |
-| [switch-pctltcp-remote](https://github.com/gmaitxqqq/switch-pctltcp-remote) | 后台 sysmodule + 远程 | 固定 IP 家庭 + 外网远程管理 |
-
----
-
-## 版本历史
-
-| 版本 | 变更 |
-|------|------|
-| **v1.5.0** | **修复 http_server_stop() 竞态**：先关 socket 再 join 线程，避免息屏唤醒死锁；**支持负数减时间**：api_allow 接受负数参数；**设置后重启计时器**：变更立即生效；WiFi 等待延迟从 2s 缩短到 0.2s |
-| **v1.4.1** | 息屏/亮屏自动恢复：时间跳跃检测息屏、WiFi 重连等待、孤儿 fd 自动清理、代际计数器防 stale fd 崩溃 |
-| **v1.4** | 移除 PSC 电源监控（解决休眠唤醒死机），改用主循环健康检查自动恢复 |
-| **v1.3** | 修复星期读取错误，显式加载时区规则；端口改为 8081 |
-| **v1.2** | 修复 pctl 按需 init/exit，避免与系统家长控制界面冲突 |
-| **v1.1** | 修复 socket 初始化（改用 BsdServiceType_System）；修复 NPDM service_host 配置 |
-| **v1.0** | 首个可用版：boot2 sysmodule，HTTP Web UI，日志记录 |
+MIT License

@@ -43,76 +43,22 @@ _Static_assert(sizeof(PlayTimerSettings) == PCTL_PLAY_TIMER_SETTINGS_SIZE,
 #define MINUTES_TO_NS(m)  ((u64)(m) * 60ULL * 1000000000ULL)
 #define NS_TO_MINUTES(ns) ((u32)((ns) / (60ULL * 1000000000ULL)))
 
-/**
- * Initialize pctl service using libnx pctlInitialize().
- * Works in both .nro and sysmodule context (pctl:s fallback).
- */
 Result pctl_init(void);
-
-/**
- * Release all pctl resources.
- */
 void pctl_exit(void);
-
-/** Check if pctl has been successfully initialized. */
 bool pctl_is_initialized(void);
-
-/** Start the play timer. */
 Result pctl_start_play_timer(void);
-
-/** Stop the play timer. */
 Result pctl_stop_play_timer(void);
-
-/** Check if play timer is enabled. */
 Result pctl_is_enabled(bool *enabled);
-
-/** Get remaining play time in nanoseconds. */
 Result pctl_get_remaining_time(u64 *remaining_ns);
-
-/** Check if system is restricted by play timer. */
 Result pctl_is_restricted(bool *restricted);
-
-/** Read current play timer settings (raw 0x44 bytes). */
 Result pctl_get_settings(PlayTimerSettings *settings);
-
-/** Write play timer settings. */
 Result pctl_set_settings(const PlayTimerSettings *settings);
-
-/**
- * Get play time limit for a specific day in minutes.
- * @param day 0=Sun..6=Sat, 7=All (returns max)
- * @param minutes Output: minutes for that day (0=unlimited)
- */
 Result pctl_get_day_limit_minutes(int day, u32 *minutes);
-
-/**
- * Set play time limit for a specific day in minutes.
- * @param day 0=Sun..6=Sat
- * @param minutes Time limit (0=unlimited=PT_DAY_NOLIMIT, or 1-1440)
- */
 Result pctl_set_day_limit_minutes(int day, u32 minutes);
-
-/**
- * Set all 7 days to the same limit.
- * @param minutes Daily time limit (0=unlimited, 1-1440)
- */
 Result pctl_set_daily_limit_minutes(u32 minutes);
-
-/** Get today's day index (0=Sun..6=Sat). */
 int pctl_get_today_day(void);
-
-/** Get current daily limit (returns first day's value). */
 Result pctl_get_daily_limit_minutes(u32 *minutes);
-
-/** Reset current day's play time (stop + re-apply settings + start). */
 Result pctl_reset_play_time(void);
-
-/**
- * Load the system timezone rule for correct day-of-week calculation.
- * MUST be called once after timeInitialize() during startup.
- * This is needed because timeToCalendarTimeWithMyRule() may fail
- * in sysmodule context where the timezone rule isn't auto-loaded.
- */
 Result pctl_load_timezone(void);
 
 #endif /* PCTL_HANDLER_H */

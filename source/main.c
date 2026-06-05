@@ -2,7 +2,7 @@
 // Build: make -> pctltcp-sysmodule.nsp (with APP_JSON)
 // Install: sd:/atmosphere/contents/010000000000BD23/exefs.nsp + flags/boot2.flag
 //
-// v1.5.0: Fix http_server_stop() race (close socket before join),
+// v1.8.0: Fix http_server_stop() race (close socket before join),
 //         support negative minutes, restart timer after set,
 //         reduce WiFi wait delay from 2s to 0.2s.
 
@@ -248,7 +248,7 @@ static void net_cleanup(void) {
  * reconnect. If we create a new socket before WiFi is ready,
  * bind() succeeds but the socket is bound to a dead interface
  * → "restarted successfully" but actually unreachable. */
-static Result http_restart(void) {
+static Result http_server_restart(void) {
     /* http_server_start() handles all cleanup internally:
      * - close old socket fd
      * - join orphaned thread
@@ -302,7 +302,7 @@ static Result init_services(void) {
     mkdir("sdmc:/switch", 0777);
     mkdir("sdmc:/switch/pctltcp-sysmodule", 0777);
 
-    log_msg("pctltcp-sysmodule starting (v1.5.0 - race fix)...");
+    log_msg("pctltcp-sysmodule starting (v1.8.0 - race fix)...");
 
     /* Load timezone rule for correct day-of-week calculation.
      * This MUST be called after timeInitialize() (which is in __appInit).
@@ -412,7 +412,7 @@ int main(int argc, char **argv) {
                      "Sleep/wake detected (%llus jump), waiting for WiFi...",
                      (unsigned long long)(t_after - t_before));
             log_msg(msg);
-            http_restart();
+            http_server_restart();
             nifm_fail_count = 0;
             continue;
         }
@@ -421,7 +421,7 @@ int main(int argc, char **argv) {
         if (g_net_up && (loop % 5 == 0)) {
             if (!http_server_is_running()) {
                 log_msg("HTTP server down, reinitializing network...");
-                http_restart();
+                http_server_restart();
                 nifm_fail_count = 0;
                 continue;
             }
@@ -439,7 +439,7 @@ int main(int argc, char **argv) {
                 nifm_fail_count++;
                 if (nifm_fail_count >= 3) {
                     log_msg("nifm unresponsive (3 failures), reinitializing...");
-                    http_restart();
+                    http_server_restart();
                     nifm_fail_count = 0;
                     continue;
                 }
@@ -459,7 +459,7 @@ int main(int argc, char **argv) {
         /* ---- Periodic restart if HTTP died but net is still up ---- */
         if (g_net_up && (loop % 60 == 0) && !http_server_is_running()) {
             log_msg("HTTP server down (periodic check), reinitializing...");
-            http_restart();
+            http_server_restart();
             nifm_fail_count = 0;
         }
 

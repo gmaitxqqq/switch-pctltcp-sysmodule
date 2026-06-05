@@ -1,5 +1,5 @@
-﻿/**
- * http_server.c - Minimal HTTP server for Switch parental control
+/**
+ * http_server.c - Minimal HTTP server for Switch parental control (LAN only)
  *
  * REST API:
  *   GET  /              -> Embedded HTML UI
@@ -7,7 +7,13 @@
  *   POST /api/allow     -> Add minutes to today's limit (additive)
  *                          body: minutes=N
  *                          calc: new_limit = current_limit + N
- *   Version: v1.5.0
+ *   Version: v1.8.0
+ *
+ * Architecture: The HTTP thread runs for the entire lifetime of the sysmodule.
+ * It never stops and restarts — instead, http_server_restart() simply closes
+ * the old server socket and creates a new one. The thread picks up the new fd
+ * on its next select() iteration. This eliminates all thread lifecycle bugs
+ * (pthread_join crashes, fd reuse, generation guard races, etc.).
  */
 #include "http_server.h"
 #include "pctl_handler.h"
@@ -27,11 +33,12 @@ extern void log_msg(const char *msg);
 /* ------------------------------------------------------------------ */
 /* State                                                               */
 /* ------------------------------------------------------------------ */
-static int       s_server_fd = -1;
-static bool      s_running   = false;
+static volatile int  s_server_fd    = -1;   /* server listen socket   */
+static volatile int  s_client_fd    = -1;   /* current client socket  */
+static volatile bool s_running      = false;
+static volatile bool s_thread_alive = false; /* thread exists & looping */
+static volatile u32  s_thread_loop_count = 0; /* incremented each loop iteration */
 static pthread_t s_thread;
-static volatile int s_generation = 0;  /* bumped on each restart */
-static bool      s_thread_active = false;  /* true after pthread_create, false after join */
 
 /* ------------------------------------------------------------------ */
 /* HTTP helpers                                                        */
@@ -99,7 +106,7 @@ static void api_status(int fd)
     char json[256];
     static const char *day_names[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
     snprintf(json, sizeof(json),
-        "{\"daily_limit_min\":%u,\"remaining_min\":%u,\"played_min\":%u,\"today\":%d,\"today_name\":\"%s\",\"version\":\"v1.5.0\"}",
+        "{\"daily_limit_min\":%u,\"remaining_min\":%u,\"played_min\":%u,\"today\":%d,\"today_name\":\"%s\",\"version\":\"v1.8.0\"}",
         daily_limit, remaining_min, played_min, today, day_names[today]);
 
     http_send(fd, "200 OK", "application/json", json);
@@ -111,12 +118,12 @@ static void api_allow(int fd, const char *body)
     const char *p = strstr(body, "minutes");
     if (p) {
         p = strchr(p + 7, '=');
-        if (p) allow_min = atoi(p + 1);
+        if (p) allow_min = atoi(p + 1);  /* 支持负数：减时间 */
     }
 
     Result rc = pctl_init();
     if (R_FAILED(rc)) {
-        http_send(fd, "200 OK", "application/json", "{\"success\":0,\"error\":\"pctl_init_failed\"}");
+            http_send(fd, "200 OK", "application/json", "{\"success\":0,\"error\":\"pctl_init_failed\"}");
         return;
     }
 
@@ -128,14 +135,13 @@ static void api_allow(int fd, const char *body)
         u32 daily_limit = 0;
         pctl_get_daily_limit_minutes(&daily_limit);
 
-        /* 有符号运算：支持负数减时间 */
+        /* 用 int 计算，支持负数减时间，然后 clamp 到 [0, 1440] */
         int new_limit = (int)daily_limit + allow_min;
         if (new_limit < 0) new_limit = 0;
         if (new_limit > 1440) new_limit = 1440;
 
         rc = pctl_set_day_limit_minutes(today, (u32)new_limit);
-
-        /* 设置后重启计时器使变更立即生效 */
+        /* 修改限额后重启计时器，强制系统用新限额重新计算剩余时间 */
         if (R_SUCCEEDED(rc)) {
             pctl_stop_play_timer();
             pctl_start_play_timer();
@@ -160,7 +166,7 @@ static const char *WEB_HTML =
 "<head>"
 "<meta charset='UTF-8'>"
 "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-"<title>Switch Timer v1.5</title>"
+"<title>Switch Timer v1.8.0</title>"
 "<style>"
 "body{font-family:sans-serif;background:#1a1a2e;color:#fff;text-align:center;padding:20px;margin:0}"
 ".box{background:rgba(255,255,255,0.1);border-radius:12px;padding:20px;margin:15px 0}"
@@ -173,11 +179,13 @@ static const char *WEB_HTML =
 "button{font-size:1em;padding:10px 18px;border:none;border-radius:8px;background:#3b82f6;color:#fff;cursor:pointer}"
 "button:active{transform:scale(0.95)}"
 ".btn-sm{background:#374151;font-size:0.9em;padding:8px 14px}"
+".btn-minus{background:#7f1d1d;font-size:0.9em;padding:8px 14px}"
 "#msg{margin-top:8px;color:#fbbf24;font-size:0.9em;min-height:20px}"
+".badge{display:inline-block;background:#10b981;color:#fff;font-size:0.7em;padding:2px 8px;border-radius:10px;margin-left:8px}"
 "</style>"
 "</head>"
 "<body>"
-"<h2>Switch Parental Control <small>v1.5</small></h2>"
+"<h2>Switch Parental Control <small>v1.8.0</small> <span class='badge'>LAN + Remote</span></h2>"
 "<div class='box'>"
 "<div class='row'>"
 "<div class='tile'><div class='lbl'>Played</div><div class='big' id='played'>--</div></div>"
@@ -187,17 +195,15 @@ static const char *WEB_HTML =
 "</div>"
 "<div class='box'>"
 "<div class='lbl'>Allow to play (minutes)</div>"
-"<input type='number' id='min' value='30' min='0' max='300'>"
+"<input type='number' id='min' value='30' min='-1440' max='1440'>"
 "<br>"
 "<div class='btns'>"
+"<button class='btn-minus' onclick='quickSet(-30)'>-30</button>"
+"<button class='btn-minus' onclick='quickSet(-10)'>-10</button>"
 "<button class='btn-sm' onclick='quickSet(15)'>+15</button>"
 "<button class='btn-sm' onclick='quickSet(30)'>+30</button>"
 "<button class='btn-sm' onclick='quickSet(60)'>+60</button>"
 "<button class='btn-sm' onclick='quickSet(90)'>+90</button>"
-"</div>"
-"<div class='btns'>"
-"<button class='btn-sm' onclick='quickSet(-10)'>-10</button>"
-"<button class='btn-sm' onclick='quickSet(-30)'>-30</button>"
 "</div>"
 "<button onclick='allow()'>Confirm</button>"
 "<div id='msg'></div>"
@@ -262,45 +268,130 @@ static void handle_request(int fd)
 }
 
 /* ------------------------------------------------------------------ */
-/* Server thread                                                       */
+/* Server thread — runs for the entire sysmodule lifetime              */
+/*                                                                      */
+/* The thread NEVER exits during normal operation. It reads s_server_fd */
+/* on each iteration. If s_server_fd == -1, it sleeps and retries.      */
+/* http_server_restart() closes the old socket and sets a new one;      */
+/* the thread picks it up automatically within one select timeout.       */
+/* This eliminates ALL thread lifecycle bugs (no stop/start, no join,   */
+/* no fd reuse, no generation guard races).                             */
 /* ------------------------------------------------------------------ */
 static void *http_thread_func(void *arg)
 {
     (void)arg;
-    int gen = s_generation;  /* snapshot at thread start */
+
+    {
+        char m[128];
+        snprintf(m, sizeof(m), "http_thread_func: started (s_server_fd=%d)", s_server_fd);
+        log_msg(m);
+    }
 
     while (s_running) {
-        /* If http_restart() happened, our socket is stale — exit immediately */
-        if (s_generation != gen) break;
+        s_thread_loop_count++;
+
+        /* Read the server fd each iteration — never cached locally.
+         * This is critical: if http_server_restart() closes the old fd
+         * and creates a new one, we must see the new fd, not a stale copy. */
+        int fd = s_server_fd;
+        if (fd < 0) {
+            /* No server socket (between restart/close). Wait and retry. */
+            svcSleepThread(200000000ULL);  /* 200ms */
+            continue;
+        }
 
         fd_set rfds;
         FD_ZERO(&rfds);
-        FD_SET(s_server_fd, &rfds);
+        FD_SET(fd, &rfds);
         struct timeval tv;
-        tv.tv_sec = 0;
-        tv.tv_usec = 500000;
+        tv.tv_sec  = 0;
+        tv.tv_usec = 500000;  /* 500ms — quick enough to see fd changes */
 
-        int ret = select(s_server_fd + 1, &rfds, NULL, NULL, &tv);
-        if (ret < 0 || s_generation != gen) {
-            s_running = false;
-            break;
+        int ret = select(fd + 1, &rfds, NULL, NULL, &tv);
+
+        /* Re-read s_server_fd after select — it may have changed during
+         * the select call (restart closed old fd, created new one).
+         * If it changed, the fd we passed to select is stale — skip accept. */
+        if (s_server_fd != fd) continue;
+
+        if (ret < 0) {
+            /* select error — fd was probably closed by restart().
+             * Don't exit! Just wait for the new fd. */
+            svcSleepThread(200000000ULL);
+            continue;
         }
         if (ret == 0) continue;
 
-        if (FD_ISSET(s_server_fd, &rfds)) {
-            /* Double-check: don't accept if we've been restarted */
-            if (s_generation != gen) break;
-            int client_fd = accept(s_server_fd, NULL, NULL);
-            if (client_fd < 0 || s_generation != gen) {
-                if (client_fd >= 0) close(client_fd);
-                s_running = false;
-                break;
+        if (FD_ISSET(fd, &rfds)) {
+            /* One more check: the fd might have changed while we were
+             * in select(). If so, don't accept on the old fd. */
+            if (s_server_fd != fd) continue;
+
+            int client_fd = accept(fd, NULL, NULL);
+            if (client_fd < 0) continue;  /* accept error, just retry */
+
+            /* Set I/O timeouts on client socket — this is CRITICAL.
+             * Without timeouts, read() in http_read_request() can block
+             * forever if a client connects but doesn't send data (e.g.,
+             * half-open connection after sleep/wake). The thread would
+             * be stuck and unable to accept new connections. */
+            {
+                struct timeval tmo;
+                tmo.tv_sec  = 3;
+                tmo.tv_usec = 0;
+                setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tmo, sizeof(tmo));
+                setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tmo, sizeof(tmo));
             }
+
+            /* Track client fd so restart() can shutdown() it */
+            s_client_fd = client_fd;
             handle_request(client_fd);
+            s_client_fd = -1;
         }
     }
 
+    /* Thread is exiting (only happens on final http_server_stop) */
+    s_thread_alive = false;
     return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/* Helper: create and bind a server socket on HTTP_PORT                */
+/* Returns the new fd, or -1 on failure.                               */
+/* ------------------------------------------------------------------ */
+static int create_server_socket(void)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        log_msg("create_server_socket: socket() failed");
+        return -1;
+    }
+
+    int optval = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(HTTP_PORT);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        log_msg("create_server_socket: bind() failed");
+        close(fd);
+        return -1;
+    }
+
+    if (listen(fd, 4) < 0) {
+        log_msg("create_server_socket: listen() failed");
+        close(fd);
+        return -1;
+    }
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "create_server_socket: OK (fd=%d, port=%d)", fd, HTTP_PORT);
+    log_msg(msg);
+    return fd;
 }
 
 /* ------------------------------------------------------------------ */
@@ -309,60 +400,36 @@ static void *http_thread_func(void *arg)
 
 void http_server_start(void)
 {
-    struct sockaddr_in addr;
-
-    /* Always close any leftover socket fd before creating a new one.
-     * This handles the case where the HTTP thread exited on its own
-     * (select error after sleep) but http_server_stop() was never called. */
-    if (s_server_fd >= 0) {
-        close(s_server_fd);
-        s_server_fd = -1;
-    }
-
-    /* If there's an orphaned thread (exited but never joined), join it now. */
-    if (s_thread_active) {
-        pthread_join(s_thread, NULL);
-        s_thread_active = false;
-    }
-
-    s_server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (s_server_fd < 0) {
-        log_msg("http_server_start: socket() failed");
+    /* If thread is already alive, just ensure there's a server socket */
+    if (s_thread_alive) {
+        if (s_server_fd < 0) {
+            int fd = create_server_socket();
+            if (fd >= 0) {
+                s_server_fd = fd;
+                log_msg("http_server_start: new socket for running thread, OK");
+            } else {
+                log_msg("http_server_start: create_server_socket failed");
+            }
+        } else {
+            log_msg("http_server_start: already running, OK");
+        }
         return;
     }
 
-    int optval = 1;
-    setsockopt(s_server_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+    /* Create server socket first */
+    int fd = create_server_socket();
+    if (fd < 0) return;
 
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family      = AF_INET;
-    addr.sin_port        = htons(HTTP_PORT);
-    addr.sin_addr.s_addr = INADDR_ANY;
+    s_server_fd = fd;
+    s_running   = true;
 
-    if (bind(s_server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        log_msg("http_server_start: bind() failed");
-        close(s_server_fd);
-        s_server_fd = -1;
-        return;
-    }
-
-    if (listen(s_server_fd, 4) < 0) {
-        log_msg("http_server_start: listen() failed");
-        close(s_server_fd);
-        s_server_fd = -1;
-        return;
-    }
-
-    s_running = true;
-    s_generation++;  /* bump so old threads know to exit */
-
-    /* Use explicit stack size for the HTTP server thread.
-     * Default pthread stack on Switch/newlib is often too small. */
+    /* Create the thread — it will run until http_server_stop() */
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 0x10000);  /* 64KB */
+    pthread_attr_setstacksize(&attr, 0x10000);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     pthread_create(&s_thread, &attr, http_thread_func, NULL);
-    s_thread_active = true;
+    s_thread_alive = true;
     pthread_attr_destroy(&attr);
 
     log_msg("http_server_start: OK");
@@ -371,22 +438,84 @@ void http_server_start(void)
 void http_server_stop(void)
 {
     s_running = false;
-    s_generation++;  /* 让旧线程的 select() 检测到代际变化后退出 */
 
-    /* 先关 socket，打断 select() 等待，避免死锁 */
+    /* Shutdown client to unblock handle_request */
+    if (s_client_fd >= 0) {
+        shutdown(s_client_fd, SHUT_RDWR);
+    }
+
+    /* Close server socket to unblock select */
     if (s_server_fd >= 0) {
         int fd = s_server_fd;
         s_server_fd = -1;
         close(fd);
     }
 
-    if (s_thread_active) {
-        pthread_join(s_thread, NULL);
-        s_thread_active = false;
+    /* Wait for thread to exit. The thread is detached, so its resources
+     * are auto-reclaimed when it exits. We do NOT call pthread_join()
+     * because that can cause 2168-0002 if the thread is still in a
+     * blocking syscall on Horizon OS. */
+    if (s_thread_alive) {
+        for (int i = 0; i < 50 && s_thread_alive; i++) {
+            svcSleepThread(100000000ULL);  /* 100ms, up to 5s */
+        }
+        if (s_thread_alive) {
+            log_msg("http_server_stop: thread did not exit in 5s");
+        }
     }
+}
+
+void http_server_restart(void)
+{
+    /* Shutdown current client if any — unblocks handle_request */
+    if (s_client_fd >= 0) {
+        shutdown(s_client_fd, SHUT_RDWR);
+    }
+
+    /* Close old server socket */
+    if (s_server_fd >= 0) {
+        int old_fd = s_server_fd;
+        s_server_fd = -1;   /* Thread sees -1 → waits instead of selecting */
+        close(old_fd);
+
+        /* Give lwIP time to fully clean up the old socket's internal state.
+         * Without this delay, creating a new socket immediately can sometimes
+         * get the same fd number, causing select() state confusion. */
+        svcSleepThread(100000000ULL);  /* 100ms */
+    }
+
+    /* Create new server socket */
+    int new_fd = create_server_socket();
+    if (new_fd < 0) {
+        log_msg("http_server_restart: failed to create new socket");
+        return;
+    }
+
+    /* Set the new fd — thread picks it up on next iteration (within 500ms) */
+    s_server_fd = new_fd;
+
+    /* If thread died somehow (shouldn't happen), create a new one */
+    if (!s_thread_alive) {
+        s_running = true;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setstacksize(&attr, 0x10000);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        pthread_create(&s_thread, &attr, http_thread_func, NULL);
+        s_thread_alive = true;
+        pthread_attr_destroy(&attr);
+        log_msg("http_server_restart: thread recreated");
+    }
+
+    log_msg("http_server_restart: OK");
+}
+
+u32 http_server_get_loop_count(void)
+{
+    return s_thread_loop_count;
 }
 
 bool http_server_is_running(void)
 {
-    return s_running;
+    return s_running && s_server_fd >= 0;
 }
