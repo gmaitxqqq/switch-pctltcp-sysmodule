@@ -2,7 +2,7 @@
 // Build: make -> pctltcp-sysmodule.nsp (with APP_JSON)
 // Install: sd:/atmosphere/contents/010000000000BD23/exefs.nsp + flags/boot2.flag
 //
-// v1.8.0: Fix http_server_stop() race (close socket before join),
+// v1.8.1: Fix http_server_stop() race (close socket before join),
 //         support negative minutes, restart timer after set,
 //         reduce WiFi wait delay from 2s to 0.2s.
 
@@ -259,7 +259,7 @@ static Result init_services(void) {
     mkdir("sdmc:/switch", 0777);
     mkdir("sdmc:/switch/pctltcp-sysmodule", 0777);
 
-    log_msg("pctltcp-sysmodule starting (v1.8.0 - race fix)...");
+    log_msg("pctltcp-sysmodule starting (v1.8.1 - race fix)...");
 
     /* Load timezone rule for correct day-of-week calculation.
      * This MUST be called after timeInitialize() (which is in __appInit).

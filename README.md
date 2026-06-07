@@ -73,6 +73,7 @@ Nintendo Switch 家长控制 sysmodule，**局域网版**（纯 LAN，无需外�
 
 | 版本 | 重要修复 |
 |------|---------|
+| v1.8.1 | **彻底修复**休眠唤醒后 8081 端口无法访问。借鉴远程隧道"每次都是新 socket"思路，在 `accept()` 连续失败时主动关闭并重建 listening socket。 |
 | v1.8.0 | 合并 remote 架构改进：去掉 `pthread_join()`（修复 2168-0002），增加 client socket 超时，线程永久运行 |
 | v1.5.0 | 修复 `http_server_stop()` 竞态，支持负数减少时间，减少 WiFi 等待延迟 |
 | v1.4.1 | 休眠/唤醒自动恢复网络连接 |
